@@ -9,14 +9,13 @@ import android.widget.ScrollView
 import android.widget.TextView
 import io.goldintelligence.engine.GoldIntelligenceEngine
 import io.goldintelligence.engine.GoldIntelligenceState
-import io.goldintelligence.engine.InputSnapshot
 
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val engine = GoldIntelligenceEngine()
-        val state = engine.evaluate(InputSnapshot.empty())
+        val state = engine.evaluate(SampleData.snapshot())
         setContentView(buildView(state))
     }
 
@@ -42,14 +41,26 @@ class MainActivity : Activity() {
             textSize = 24f
             gravity = Gravity.CENTER_HORIZONTAL
             setTextColor(Color.rgb(214, 179, 106))
-            setPadding(0, 0, 0, 40)
+            setPadding(0, 0, 0, 12)
         }
         content.addView(title)
+
+        val demoNotice = TextView(this).apply {
+            text = "SAMPLE DATA — not live market data (no data feed connected yet)"
+            textSize = 12f
+            gravity = Gravity.CENTER_HORIZONTAL
+            setTextColor(Color.rgb(180, 90, 90))
+            setPadding(0, 0, 0, 40)
+        }
+        content.addView(demoNotice)
 
         addLine("Signal State", state.signalState.name)
         addLine("Direction", state.direction.name)
         addLine("Gold Bias", state.goldBias?.let { "%.1f / 100".format(it) } ?: "N/A")
-        addLine("Probability", state.probability?.let { "%.2f%%".format(it * 100) } ?: "N/A")
+        addLine(
+            "Probability (heuristic, non-calibrated)",
+            state.probability?.let { "%.2f%%".format(it * 100) } ?: "N/A"
+        )
         addLine("Confidence", state.confidence?.let { "%.2f%%".format(it * 100) } ?: "N/A")
         addLine("Regime", state.regime.name)
         addLine("Regime Stability", state.regimeStability.name)

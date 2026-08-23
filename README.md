@@ -34,11 +34,11 @@ All numeric thresholds and cluster weights used by these engines live in
 per the specification's own directive that base parameters require later
 Walk-Forward recalibration against live data.
 
-The `ProbabilityModel` / `ProbabilityCalibrator` / `HistoricalAnalogueEngine`
-contracts remain unimplemented (`NoProbabilityModel`, `NoOpCalibrator`,
-`NoHistoricalAnalogueEngine`) because they require a trained/calibrated
-model and historical dataset that do not yet exist; supplying one is the
-next stage of this project.
+A `HeuristicProbabilityModel` is wired as the default `ProbabilityModel` so Probability/Confidence are not permanently absent. It is an explicitly non-calibrated, transparent placeholder (equal base-weight average of the supplied factors through a logistic transform) — it is **not** the specification's calibrated "P(Gold Up | Current State)" (Probability Calibration layer, spec items 16–17) and must be replaced by a properly trained/back-tested model before any output is used for a real decision. `NoProbabilityModel` remains available for callers that want a hard `null` instead.
+
+`RuleBasedLiquidityEngine` assesses Liquidity from Dollar Funding Stress (spec item 7); it reports `UNKNOWN` when that feature is absent rather than guessing.
+
+The `HistoricalAnalogueEngine` contract remains unimplemented (`NoHistoricalAnalogueEngine`) because it requires a historical dataset that does not yet exist; supplying one is a later stage of this project.
 
 See `DATA_DICTIONARY.md` for the full Master List → Factor → Feature Key mapping.
 

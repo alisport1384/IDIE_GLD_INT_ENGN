@@ -9,7 +9,8 @@ class GoldIntelligenceEngine(
     private val regimeEngine: RegimeEngine = ThresholdRegimeEngine(),
     private val shockEngine: ShockDetectionEngine = RuleBasedShockDetectionEngine(),
     private val scoringPipeline: ScoringPipeline = ScoringPipeline(),
-    private val probabilityModel: ProbabilityModel = NoProbabilityModel(),
+    private val liquidityEngine: LiquidityAssessmentEngine = RuleBasedLiquidityEngine(),
+    private val probabilityModel: ProbabilityModel = HeuristicProbabilityModel(),
     private val calibrator: ProbabilityCalibrator = NoOpCalibrator(),
     private val confidenceEngine: ConfidenceEngine = EvidenceConfidenceEngine(),
     private val analogueEngine: HistoricalAnalogueEngine = NoHistoricalAnalogueEngine(),
@@ -38,6 +39,8 @@ class GoldIntelligenceEngine(
         }
 
         val scoring = scoringPipeline.run(suppliedFactors, features, regime, now)
+        val liquidity = liquidityEngine.assess(features)
+            .let { if (it != Liquidity.UNKNOWN) it else input.liquidity }
 
         val dominantFactor = input.dominantFactor ?: scoring.dominantFactor
         val effectiveSnapshot = input.copy(
@@ -52,7 +55,7 @@ class GoldIntelligenceEngine(
 
         val rawProbability = probabilityModel.predict(effectiveSnapshot)
         val calibrated = rawProbability?.let(calibrator::calibrate)
-        val confidence = confidenceEngine.calculate(input, calibrated)
+        val confidence = confidenceEngine.calculate(effectiveSnapshot, calibrated)
 
         val direction = when {
             calibrated == null -> biasDirection(scoring.goldBias)
@@ -114,7 +117,7 @@ class GoldIntelligenceEngine(
             contradictions = effectiveSnapshot.contradictions,
             crossMarketConfirmation = null,
             newsState = newsState,
-            liquidity = input.liquidity,
+            liquidity = liquidity,
             shock = shockState,
             expectedMove = null,
             uncertainty = uncertainty,

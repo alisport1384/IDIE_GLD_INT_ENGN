@@ -77,6 +77,10 @@ interface EventEngine {
     fun evaluate(event: EventRecord): Double?
 }
 
+interface LiquidityAssessmentEngine {
+    fun assess(features: FeatureSet): Liquidity
+}
+
 interface NewsIntelligenceEngine {
     fun evaluate(news: NewsRecord): NewsImpact
 }

@@ -57,10 +57,9 @@ class EvidenceConfidenceEngine : ConfidenceEngine {
         distribution: ProbabilityDistribution?
     ): Double? {
         if (distribution == null) return null
-        val quality = snapshot.observations.values
-            .map { it.quality }
-            .ifEmpty { return null }
-            .average()
+        val observationQuality = snapshot.observations.values.map { it.quality }
+        val factorQuality = snapshot.factorScores.map { it.quality }
+        val quality = (observationQuality + factorQuality).ifEmpty { return null }.average()
         val contradictionPenalty = (snapshot.contradictions.size * 0.1).coerceAtMost(0.8)
         return (quality - contradictionPenalty).coerceIn(0.0, 1.0)
     }
