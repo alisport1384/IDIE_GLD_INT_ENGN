@@ -47,11 +47,14 @@ class ScoringPipelineTest {
 
     @Test
     fun `evenly opposed factors are flagged as high conflict`() {
+        // Opposition is measured in weighted mass, not in factor count: under the
+        // corrected SPEC v2 prior table F01 alone carries 0.20 against the 0.22
+        // held jointly by F03, F05 and F07.
         val scores = listOf(
             FactorScore("F01_REAL_RATE", -50.0),
-            FactorScore("F02_USD", -50.0),
-            FactorScore("F07_GEOPOLITICAL_RISK", 50.0),
-            FactorScore("F09_GOLD_FLOW", 50.0)
+            FactorScore("F03_FED", 50.0),
+            FactorScore("F05_INFLATION", 50.0),
+            FactorScore("F07_GEOPOLITICAL_RISK", 50.0)
         )
         val result = pipeline.run(scores, FeatureSet(), Regime.NORMAL, now)
         assertEquals(ConflictLevel.HIGH, result.conflict)

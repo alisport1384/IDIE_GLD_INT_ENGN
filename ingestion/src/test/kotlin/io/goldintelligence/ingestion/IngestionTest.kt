@@ -108,7 +108,7 @@ class SnapshotAdapterTest {
         assertEquals(2500.0, snapshot.observations["GC"]!!.value, 1e-9)
         assertEquals(2498.0, snapshot.observations["GOLD_SPOT"]!!.value, 1e-9)
         assertEquals(1.85, snapshot.observations["US10Y_REAL_YIELD"]!!.value, 1e-9)
-        assertEquals(1.90, snapshot.observations["US10Y_REAL_YIELD"]!!.expected, 1e-9)
+        assertEquals(1.90, snapshot.observations["US10Y_REAL_YIELD"]!!.expected!!, 1e-9)
     }
 
     @Test

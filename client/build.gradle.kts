@@ -8,7 +8,7 @@ kotlin {
 
 
 dependencies {
-    api(project(":engine"))
+    api(project(":ingestion"))
 
     testImplementation("junit:junit:4.13.2")
 }

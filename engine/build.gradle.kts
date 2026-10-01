@@ -1,21 +1,17 @@
 plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.android")
-}
-
-android {
-    namespace = "io.goldintelligence.engine"
-    compileSdk = 36
-
-    defaultConfig {
-        minSdk = 29
-    }
+    id("org.jetbrains.kotlin.jvm")
 }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(17)
+    compilerOptions {
+        freeCompilerArgs.add("-Xjvm-default=all")
+    }
 }
+
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
 }
+
+tasks.withType<Test>().configureEach { useJUnit() }

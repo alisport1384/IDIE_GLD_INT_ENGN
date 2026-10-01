@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "GoldIntelligenceEngine"
-include(":app", ":engine", ":ingestion")
+include(":app", ":engine", ":ingestion", ":client", ":server")

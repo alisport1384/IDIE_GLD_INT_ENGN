@@ -9,7 +9,9 @@ package io.goldintelligence.engine
  * values, sources, or formulas.
  */
 object FeatureKeys {
-    // Factor 1 — Real Rate
+    // Factor 1 — Real Rate (SPEC v2 §3.6: intraday proxy, US cash hours only)
+    const val REAL_YIELD_INTRADAY_PROXY = "RealYield_Intraday_Proxy"
+
     const val REAL_YIELD = "RealYield"
     const val REAL_YIELD_ZSCORE = "RealYield_ZScore"
     const val REAL_YIELD_TREND = "RealYield_Trend"
@@ -57,6 +59,9 @@ object FeatureKeys {
     const val COT_EXTREME_LONG = "COT_ExtremeLong"
     const val COT_EXTREME_SHORT = "COT_ExtremeShort"
 
+    // Factor 10 — Central Bank Demand (continued)
+    const val CENTRAL_BANK_PROXY_FLOW = "CentralBank_Proxy_Flow"
+
     // Factor 12 — Physical Demand
     const val PHYSICAL_DEMAND_INDEX = "PhysicalDemand_Index"
 
@@ -68,12 +73,17 @@ object FeatureKeys {
     // Factor 14 — Market Microstructure
     const val MICROSTRUCTURE_IMBALANCE = "Microstructure_Imbalance"
 
+    // SPEC v2 §1.5 — COMEX forward curve
+    const val FUTURES_BASIS = "Futures_Basis"
+    const val TERM_STRUCTURE_SLOPE = "TermStructure_Slope"
+
     // Factor 15 — Options / Volatility
     const val GOLD_IV_SKEW = "Gold_IV_Skew"
     const val GOLD_REALIZED_VOL_ZSCORE = "Gold_RealizedVol_ZScore"
 
     // Factor 16 — Cross-Asset Relationships
     const val GOLD_SILVER_RATIO = "Gold_Silver_Ratio"
+    const val GOLD_SILVER_RATIO_ZSCORE = "Gold_Silver_Ratio_ZScore"
 
     // Factor 17 — Liquidity
     const val DOLLAR_FUNDING_STRESS = "DollarFunding_Stress"

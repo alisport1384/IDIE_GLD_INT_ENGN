@@ -1,5 +1,6 @@
 plugins {
     id("org.jetbrains.kotlin.jvm")
+    application
 }
 
 kotlin {
@@ -7,8 +8,12 @@ kotlin {
 }
 
 
+application {
+    mainClass.set("io.goldintelligence.server.MainKt")
+}
+
 dependencies {
-    api(project(":engine"))
+    implementation(project(":client"))
 
     testImplementation("junit:junit:4.13.2")
 }

@@ -1,0 +1,50 @@
+Gold Intelligence Engine
+========================
+
+This application consumes only free, publicly reachable data sources. No
+credentials, API keys or paid subscriptions are required or embedded.
+
+Attribution
+-----------
+
+U.S. Department of the Treasury — Daily Treasury Par Yield Curve Rates and
+  Daily Treasury Par Real Yield Curve Rates. Public domain.
+  https://home.treasury.gov
+
+U.S. Commodity Futures Trading Commission — Commitments of Traders.
+  Public domain.
+  https://publicreporting.cftc.gov
+
+Federal Reserve Bank of New York — Reference Rates (SOFR, EFFR). Public domain.
+  https://markets.newyorkfed.org
+
+Cboe Global Markets, Inc. — delayed index and equity quotes and daily history.
+  Data is delayed and is used under attribution. (c) Cboe Global Markets, Inc.
+  https://www.cboe.com
+
+European Central Bank — euro foreign exchange reference rates, retrieved via
+  the Frankfurter API. Attribution required.
+  https://www.ecb.europa.eu / https://frankfurter.app
+
+gold-api.com — spot gold and silver reference prices. Attribution required.
+  https://api.gold-api.com
+
+Yahoo Finance chart API — used only where a licence-restricted source is
+  acceptable for DERIVED values. Raw values from this source are never
+  published by the application.
+
+Licence policy
+--------------
+
+A value whose licence class is not PUBLIC_DOMAIN or ATTRIBUTION is never
+rendered raw in the user interface or returned raw by the REST API; only
+derived quantities (z-scores, ranks, signs, factor scores) are exposed.
+This rule is enforced in code, in the data contract, not only in documentation.
+
+Disclaimer
+----------
+
+This software produces a statistical description of market conditions. It is
+not investment advice, it does not publish a calibrated probability until a
+live scoring record exists, and it reports the absence of a source rather than
+substituting a guess.
