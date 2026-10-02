@@ -10,7 +10,7 @@
 |---|---|---|
 | `GoldIntelligence-1.0.0-release.apk` | 2,840,584 B | `af419395d1d447f8f44a5ef77023339494e9c331f7a8f0450e5976a0ed11a959` |
 | `GoldIntelligence-1.0.0-debug.apk` | 3,770,879 B | `f011dcbd71ad0741074fe0e8a22fc85e757a216ed6f85f69abc23cb63004a41a` |
-| `IDIE_GLD_INT_ENGN-source.zip` | 983,431 B · 639 فایل | `bdf63bf8503908483f24625df3379abd80d0e3f477a10c353a06ec60dd265a55` |
+| `IDIE_GLD_INT_ENGN-source.zip` | 997,523 B · 643 فایل | `fcab8cd5d9ad8672c4b3076e74e8952d39c2248963fbfdd1b348a59363574c86` |
 | `SHA256SUMS.txt` | — | چک‌سام سه فایل بالا |
 
 بررسی / verify:
