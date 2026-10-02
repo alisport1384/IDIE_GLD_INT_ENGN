@@ -53,6 +53,10 @@ class IntelligenceServer(
         server.createContext("/v1/diagnostics") { ex -> json(ex, screen(ScreenModel.SCREEN_DIAGNOSTICS)) }
         // SPEC v2.1 §21 — the operational log, on its own endpoints so it is
         // never mixed into an analytical payload.
+        // SPEC v2.1 §22 — live chart: the row mirror, and the raw payload the
+        // app draws, so a browser client can plot the same thing.
+        server.createContext("/v1/chart") { ex -> json(ex, screen(ScreenModel.SCREEN_CHART)) }
+        server.createContext("/v1/chart.json") { ex -> json(ex, chartJson()) }
         server.createContext("/v1/logs") { ex -> json(ex, screen(ScreenModel.SCREEN_LOGS)) }
         server.createContext("/v1/logs.json") { ex -> json(ex, logsJson(ex)) }
         server.createContext("/v1/logs.md") { ex ->
@@ -170,10 +174,115 @@ class IntelligenceServer(
             listOf(
                 "/v1/health", "/v1/screens", "/v1/state", "/v1/factors", "/v1/indicators",
                 "/v1/horizons", "/v1/events", "/v1/diagnostics", "/v1/report", "/v1/stream",
-                "/v1/logs", "/v1/logs.json", "/v1/logs.md", "/v1/logs.txt"
+                "/v1/logs", "/v1/logs.json", "/v1/logs.md", "/v1/logs.txt",
+                "/v1/chart", "/v1/chart.json"
             )
         ) { JsonWriter.str(it) }
     )
+
+    /** Candles plus the price-anchored overlay, exactly as the app draws them. */
+    private fun chartJson(): String {
+        val c = cache.get()?.chart
+            ?: return JsonWriter.obj(
+                "available" to JsonWriter.bool(false),
+                "reason" to JsonWriter.str("no chart payload in the current snapshot")
+            )
+        val q = c.quote
+        return JsonWriter.obj(
+            "available" to JsonWriter.bool(true),
+            "symbol" to JsonWriter.str(c.symbol),
+            "venue" to JsonWriter.str(c.venue),
+            "venueLabel" to JsonWriter.str(c.venueLabel),
+            "timeframe" to JsonWriter.str(c.timeframe.code),
+            "asOf" to JsonWriter.str(c.asOf.toString()),
+            "quote" to (q?.let {
+                JsonWriter.obj(
+                    "last" to JsonWriter.num(it.last),
+                    "bid" to JsonWriter.num(it.bid),
+                    "ask" to JsonWriter.num(it.ask),
+                    "open" to JsonWriter.num(it.open),
+                    "high" to JsonWriter.num(it.high),
+                    "low" to JsonWriter.num(it.low),
+                    "changePct" to JsonWriter.num(it.changePct),
+                    "changeAbs" to JsonWriter.num(it.changeAbs),
+                    "spreadBp" to JsonWriter.num(it.spreadBp),
+                    "updateMode" to JsonWriter.str(it.updateMode),
+                    "quotedAt" to JsonWriter.str(it.quotedAt.toString())
+                )
+            } ?: "null"),
+            "series" to JsonWriter.obj(
+                "liveBars" to JsonWriter.num(c.series.liveBars),
+                "seededBars" to JsonWriter.num(c.series.seededBars),
+                "seedSource" to JsonWriter.str(c.series.seedSource),
+                "rebaseFactor" to JsonWriter.num(c.series.rebaseFactor),
+                "candles" to JsonWriter.arr(c.series.candles) { k ->
+                    JsonWriter.obj(
+                        "t" to JsonWriter.str(k.time.toString()),
+                        "o" to JsonWriter.num(k.open),
+                        "h" to JsonWriter.num(k.high),
+                        "l" to JsonWriter.num(k.low),
+                        "c" to JsonWriter.num(k.close),
+                        "origin" to JsonWriter.str(k.origin.name)
+                    )
+                }
+            ),
+            "headline" to JsonWriter.obj(
+                "direction" to JsonWriter.str(c.headline.direction),
+                "bias" to JsonWriter.num(c.headline.bias),
+                "confidence" to JsonWriter.num(c.headline.confidence),
+                "regime" to JsonWriter.str(c.headline.regime),
+                "signalState" to JsonWriter.str(c.headline.signalState),
+                "probabilityStatus" to JsonWriter.str(c.headline.probabilityStatus),
+                "killSwitch" to JsonWriter.str(c.headline.killSwitch),
+                "horizon" to JsonWriter.str(c.headline.horizon)
+            ),
+            "levels" to JsonWriter.arr(c.levels) { l ->
+                JsonWriter.obj(
+                    "price" to JsonWriter.num(l.price),
+                    "kind" to JsonWriter.str(l.kind.name),
+                    "labelEn" to JsonWriter.str(l.labelEn),
+                    "labelFa" to JsonWriter.str(l.labelFa)
+                )
+            },
+            "deltas" to JsonWriter.arr(c.deltas) { d ->
+                JsonWriter.obj(
+                    "key" to JsonWriter.str(d.key),
+                    "labelEn" to JsonWriter.str(d.labelEn),
+                    "previous" to JsonWriter.str(d.previous),
+                    "current" to JsonWriter.str(d.current),
+                    "changed" to JsonWriter.bool(d.changed),
+                    "direction" to JsonWriter.num(d.direction)
+                )
+            },
+            "dual" to JsonWriter.arr(c.dual) { d ->
+                JsonWriter.obj(
+                    "kind" to JsonWriter.str(d.kind.name),
+                    "reasonEn" to JsonWriter.str(d.reasonEn),
+                    "primary" to JsonWriter.obj(
+                        "labelEn" to JsonWriter.str(d.primary.labelEn),
+                        "direction" to JsonWriter.str(d.primary.direction),
+                        "strength" to JsonWriter.num(d.primary.strength),
+                        "detailEn" to JsonWriter.str(d.primary.detailEn)
+                    ),
+                    "secondary" to JsonWriter.obj(
+                        "labelEn" to JsonWriter.str(d.secondary.labelEn),
+                        "direction" to JsonWriter.str(d.secondary.direction),
+                        "strength" to JsonWriter.num(d.secondary.strength),
+                        "detailEn" to JsonWriter.str(d.secondary.detailEn)
+                    )
+                )
+            },
+            "exceptions" to JsonWriter.arr(c.exceptions) { e ->
+                JsonWriter.obj(
+                    "code" to JsonWriter.str(e.code),
+                    "component" to JsonWriter.str(e.component),
+                    "severity" to JsonWriter.str(e.severity),
+                    "messageEn" to JsonWriter.str(e.messageEn),
+                    "at" to JsonWriter.str(e.at.toString())
+                )
+            }
+        )
+    }
 
     private fun logHeader(): Map<String, String> = linkedMapOf(
         "spec" to io.goldintelligence.engine.MultiHorizonEngine.SPEC_VERSION,

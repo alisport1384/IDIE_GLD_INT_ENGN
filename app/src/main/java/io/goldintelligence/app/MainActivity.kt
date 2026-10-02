@@ -25,6 +25,9 @@ import android.widget.TextView
 import android.widget.Toast
 import io.goldintelligence.client.Badge
 import io.goldintelligence.client.BadgeKind
+import io.goldintelligence.client.BrokerFeedProvider
+import io.goldintelligence.client.ChartPayload
+import io.goldintelligence.client.ChartTimeframe
 import io.goldintelligence.client.ClientMode
 import io.goldintelligence.client.GoldIntelligenceClient
 import io.goldintelligence.client.Row
@@ -32,6 +35,7 @@ import io.goldintelligence.client.Screen
 import io.goldintelligence.client.ScreenModel
 import io.goldintelligence.engine.DiagnosticLog
 import io.goldintelligence.engine.LogLevel
+import io.goldintelligence.engine.LogStage
 import io.goldintelligence.engine.MultiHorizonEngine
 import java.time.Duration
 import java.time.Instant
@@ -71,6 +75,10 @@ class MainActivity : Activity() {
     private var logFilter: String = ""
     private var logMinLevel: LogLevel = LogLevel.DEBUG
     private var pendingExport: Pair<String, String>? = null
+
+    /** SPEC v2.1 §22 — live chart state. */
+    private var chart: ChartPayload? = null
+    private var chartView: ChartView? = null
 
     private val autoRefresh = object : Runnable {
         override fun run() {
@@ -217,7 +225,10 @@ class MainActivity : Activity() {
             ui.post {
                 loading = false
                 progress.visibility = View.GONE
-                if (result != null) model = result.screens
+                if (result != null) {
+                    model = result.screens
+                    chart = result.chart
+                }
                 render()
             }
         }
@@ -234,6 +245,10 @@ class MainActivity : Activity() {
         // that is precisely when it is needed.
         if (selected == ScreenModel.SCREEN_LOGS) {
             renderLogger()
+            return
+        }
+        if (selected == ScreenModel.SCREEN_CHART) {
+            renderChart()
             return
         }
 
@@ -261,6 +276,7 @@ class MainActivity : Activity() {
                 ScreenModel.SCREEN_HORIZONS to (if (persian) "افق‌ها" else "Horizons"),
                 ScreenModel.SCREEN_EVENTS to (if (persian) "رویدادها" else "Events"),
                 ScreenModel.SCREEN_DIAGNOSTICS to (if (persian) "تشخیص" else "Diagnostics"),
+                ScreenModel.SCREEN_CHART to (if (persian) "چارت زنده" else "Live Chart"),
                 ScreenModel.SCREEN_LOGS to (if (persian) "گزارش‌گیر" else "Logger")
             )
         for ((id, label) in ids) {
@@ -280,6 +296,207 @@ class MainActivity : Activity() {
             }
             tabBar.addView(b)
         }
+    }
+
+    /* ------------------------- live chart (SPEC v2.1 §22) -------------------------
+     * The canvas and the engine share one coordinate space, so a level the
+     * engine published is drawn exactly at that price. The textual mirror of
+     * the same payload stays available on the CHART screen of the API.
+     */
+
+    private fun renderChart() {
+        content.addView(chartControls())
+
+        val view = chartView ?: ChartView(this).also { chartView = it }
+        (view.parent as? ViewGroup)?.removeView(view)
+        view.bind(chart, persian)
+        view.layoutParams = LinearLayout.LayoutParams(MATCH, dp(320))
+        content.addView(view)
+
+        val c = chart
+        if (c == null) {
+            content.addView(note(if (persian) "فید چارت هنوز دریافت نشده است." else "Chart feed not received yet."))
+            return
+        }
+
+        if (c.dual.isNotEmpty()) {
+            content.addView(sectionHeader(if (persian) "تحلیل دوگانه" else "Dual analysis"))
+            val card = cardBox()
+            c.dual.forEachIndexed { i, d ->
+                if (i > 0) card.addView(divider())
+                card.addView(
+                    renderRow(
+                        Row(
+                            d.primary.labelFa, d.primary.labelEn, d.primary.direction,
+                            listOf(
+                                Badge(d.kind.name, BadgeKind.WARN),
+                                Badge("%.2f".format(d.primary.strength), BadgeKind.INFO)
+                            ),
+                            noteFa = d.primary.detailFa, noteEn = d.primary.detailEn, emphasis = true
+                        )
+                    )
+                )
+                card.addView(
+                    renderRow(
+                        Row(
+                            d.secondary.labelFa, d.secondary.labelEn, d.secondary.direction,
+                            listOf(
+                                Badge(if (persian) "خوانش دوم" else "second reading", BadgeKind.WARN),
+                                Badge("%.2f".format(d.secondary.strength), BadgeKind.INFO)
+                            ),
+                            noteFa = d.secondary.detailFa, noteEn = d.secondary.detailEn, emphasis = true
+                        )
+                    )
+                )
+                card.addView(
+                    renderRow(
+                        Row("دلیل", "Reason", "—", noteFa = d.reasonFa, noteEn = d.reasonEn)
+                    )
+                )
+            }
+            content.addView(card)
+        }
+
+        val changed = c.deltas.filter { it.changed }
+        content.addView(
+            sectionHeader(
+                (if (persian) "تغییر نسبت به اجرای قبلی" else "Change since last refresh") + "   ·   ${changed.size}"
+            )
+        )
+        val deltaCard = cardBox()
+        val shown = if (changed.isEmpty()) c.deltas else changed
+        shown.forEachIndexed { i, d ->
+            if (i > 0) deltaCard.addView(divider())
+            deltaCard.addView(
+                renderRow(
+                    Row(
+                        d.labelFa, d.labelEn,
+                        if (d.changed) "${d.previous} → ${d.current}" else d.current,
+                        listOf(
+                            Badge(
+                                when {
+                                    d.firstObservation -> "FIRST"
+                                    d.changed && d.direction > 0 -> "▲"
+                                    d.changed && d.direction < 0 -> "▼"
+                                    d.changed -> "CHANGED"
+                                    else -> "SAME"
+                                },
+                                when {
+                                    !d.changed -> BadgeKind.INFO
+                                    d.direction > 0 -> BadgeKind.OK
+                                    d.direction < 0 -> BadgeKind.WARN
+                                    else -> BadgeKind.INFO
+                                }
+                            )
+                        ),
+                        emphasis = d.changed
+                    )
+                )
+            )
+        }
+        content.addView(deltaCard)
+
+        content.addView(
+            sectionHeader((if (persian) "اکسپشن‌ها" else "Exceptions") + "   ·   ${c.exceptions.size}")
+        )
+        val exCard = cardBox()
+        if (c.exceptions.isEmpty()) {
+            exCard.addView(
+                renderRow(
+                    Row("—", "No exception", "CLEAN", listOf(Badge("OK", BadgeKind.OK)))
+                )
+            )
+        } else {
+            c.exceptions.forEachIndexed { i, e ->
+                if (i > 0) exCard.addView(divider())
+                exCard.addView(
+                    renderRow(
+                        Row(
+                            e.code, e.code, e.component,
+                            listOf(
+                                Badge(
+                                    e.severity,
+                                    if (e.severity == "ERROR") BadgeKind.ERROR else BadgeKind.WARN
+                                )
+                            ),
+                            noteFa = e.messageFa, noteEn = e.messageEn,
+                            emphasis = e.severity == "ERROR"
+                        )
+                    )
+                )
+            }
+        }
+        content.addView(exCard)
+    }
+
+    private fun chartControls(): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) }
+        }
+
+        val brokers = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        BrokerFeedProvider.VENUES.forEach { v ->
+            val active = client.chartVenue.id == v.id
+            brokers.addView(Button(this).apply {
+                text = v.id
+                isAllCaps = false
+                setTextColor(if (active) BG else ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                background = pill(if (active) ACCENT else PANEL_HI, ACCENT_DIM)
+                setPadding(dp(6), dp(2), dp(6), dp(2))
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(4) }
+                setOnClickListener {
+                    if (client.chartVenue.id != v.id) {
+                        client.chartVenue = v
+                        DiagnosticLog.shared.info(
+                            LogStage.CHART, "MainActivity",
+                            "VENUE_SWITCHED", "chart venue set to ${v.label}", key = "CHART_FEED"
+                        )
+                        refresh()
+                    }
+                }
+            })
+        }
+        box.addView(brokers)
+
+        val frames = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        ChartTimeframe.entries.forEach { tf ->
+            val active = client.chartTimeframe == tf
+            frames.addView(Button(this).apply {
+                text = tf.code
+                isAllCaps = false
+                setTextColor(if (active) BG else ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                background = pill(if (active) ACCENT else PANEL_HI, ACCENT_DIM)
+                setPadding(dp(4), dp(2), dp(4), dp(2))
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(4) }
+                setOnClickListener {
+                    if (client.chartTimeframe != tf) {
+                        client.chartTimeframe = tf
+                        DiagnosticLog.shared.info(
+                            LogStage.CHART, "MainActivity",
+                            "TIMEFRAME_SWITCHED", "chart timeframe set to ${tf.code}", key = "CHART_FEED"
+                        )
+                        refresh()
+                    }
+                }
+            })
+        }
+        box.addView(frames)
+        return box
+    }
+
+    private fun cardBox(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = card()
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) }
     }
 
     /* ------------------------- logger (SPEC v2.1 §21) -------------------------

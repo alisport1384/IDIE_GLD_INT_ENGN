@@ -32,7 +32,10 @@ enum class LogStage {
     REGIME,
     HORIZON,
     RENDER,
-    EXPORT
+    EXPORT,
+
+    /** SPEC v2.1 §22 — live chart feed, bar assembly and overlay rendering. */
+    CHART
 }
 
 /**

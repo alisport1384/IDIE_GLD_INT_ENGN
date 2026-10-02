@@ -62,6 +62,13 @@ data class ScreenModel(
          */
         const val SCREEN_LOGS = "LOGS"
 
+        /**
+         * SPEC v2.1 §22 — the live chart. The engine's conclusion, what
+         * changed since the previous refresh, any competing reading and any
+         * exception are drawn on the price axis itself.
+         */
+        const val SCREEN_CHART = "CHART"
+
         fun error(messageFa: String, messageEn: String, now: Instant = Instant.now()): ScreenModel =
             ScreenModel(
                 generatedAt = now,

@@ -28,7 +28,9 @@ data class AnalysisResult(
     val universe: MarketUniverse?,
     val features: FeatureBundle?,
     val diagnostics: List<FactorDiagnostic>,
-    val screens: ScreenModel
+    val screens: ScreenModel,
+    /** SPEC v2.1 §22 — live chart surface; null when the feed produced nothing. */
+    val chart: ChartPayload? = null
 )
 
 /**
@@ -47,8 +49,21 @@ class GoldIntelligenceClient(
     private val featureEngineer: SpecFeatureEngineer = SpecFeatureEngineer(),
     private val factorEngine: SpecFactorEngine = SpecFactorEngine(),
     private val engine: MultiHorizonEngine = MultiHorizonEngine(),
-    private val screenBuilder: ScreenModelBuilder = ScreenModelBuilder()
+    private val screenBuilder: ScreenModelBuilder = ScreenModelBuilder(),
+    private val chartFeed: BrokerFeedProvider = BrokerFeedProvider(http),
+    private val chartStore: LiveChartStore = LiveChartStore(),
+    private val overlayBuilder: ChartOverlayBuilder = ChartOverlayBuilder()
 ) {
+    /** Broker the chart draws. Switchable from the app; OANDA by default. */
+    @Volatile
+    var chartVenue: BrokerFeedProvider.Venue = BrokerFeedProvider.DEFAULT
+
+    @Volatile
+    var chartTimeframe: ChartTimeframe = ChartTimeframe.H1
+
+    @Volatile
+    private var lastMemo: ChartOverlayBuilder.Memo? = null
+
     @Volatile
     private var lastFactorHistory: MutableMap<String, MutableList<Double>> = HashMap()
 
@@ -83,8 +98,9 @@ class GoldIntelligenceClient(
 
         val context = buildContext(universe, factors.scores.associate { it.factorId to it.score }, now)
         val report = engine.evaluate(snapshot, context, now)
+        val chart = buildChart(report, factors.diagnostics, now)
 
-        return AnalysisResult(
+        val result = AnalysisResult(
             report = report,
             universe = universe,
             features = features,
@@ -94,8 +110,50 @@ class GoldIntelligenceClient(
                 calendar = aggregator.lastCalendar,
                 books = aggregator.lastBooks,
                 otcTiers = aggregator.lastOtcTiers,
-                goldCurve = aggregator.lastGoldCurve
-            )
+                goldCurve = aggregator.lastGoldCurve,
+                chart = chart
+            ),
+            chart = chart
+        )
+        lastMemo = overlayBuilder.memo(report, factors.diagnostics)
+        return result
+    }
+
+    /**
+     * SPEC v2.1 §22 — refreshes the broker feed, advances the bar store and
+     * rebuilds the overlay. A feed failure degrades the chart to whatever is
+     * already stored and is reported on the chart itself, never swallowed.
+     */
+    private fun buildChart(
+        report: IntelligenceReport?,
+        diagnostics: List<FactorDiagnostic>,
+        now: Instant
+    ): ChartPayload {
+        val venue = chartVenue
+        val timeframe = chartTimeframe
+        val snapshot = chartFeed.snapshot(venue, listOf(timeframe))
+
+        val last = snapshot.quote?.last
+        if (last != null && !chartStore.hasHistory(timeframe)) {
+            val seed = chartFeed.seedCandles(timeframe)
+            if (seed.isNotEmpty()) {
+                chartStore.seed(timeframe, seed, last, "Kraken PAXG/USD")
+            }
+        }
+        // Bars are bucketed by ingest time: the venue's own stamp is a session
+        // marker and would place the forming bar in the wrong period.
+        snapshot.bars[timeframe]?.let { chartStore.apply(timeframe, it, now) }
+
+        val series = chartStore.series(timeframe, venue.ticker, venue.label)
+        return overlayBuilder.build(
+            report = report,
+            quote = snapshot.quote,
+            series = series,
+            venue = venue,
+            previous = lastMemo,
+            feedFailure = snapshot.failureCode,
+            diagnostics = diagnostics,
+            now = now
         )
     }
 

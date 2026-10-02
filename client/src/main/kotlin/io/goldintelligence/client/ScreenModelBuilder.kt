@@ -42,7 +42,8 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
         calendar: List<CalendarEvent> = emptyList(),
         books: List<OrderBookDepth> = emptyList(),
         otcTiers: List<SizeTierQuote> = emptyList(),
-        goldCurve: List<Pair<String, Double>> = emptyList()
+        goldCurve: List<Pair<String, Double>> = emptyList(),
+        chart: ChartPayload? = null
     ): ScreenModel {
         val now = report.generatedAt
         return ScreenModel(
@@ -55,6 +56,7 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
                 horizonsScreen(report),
                 eventsScreen(report, universe, calendar, now),
                 diagnosticsScreen(report, universe, features, books, otcTiers, goldCurve, now),
+                chartScreen(chart, now),
                 logsScreen()
             ),
             attribution = Providers.all.map { "${it.displayName} — ${it.attribution}" },
@@ -582,6 +584,213 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
                 Section("وضعیت شکاف‌های داده", "Data Gap Status", gaps)
             )
         )
+    }
+
+    /* ---------------- Screen 7 — CHART (SPEC v2.1 §22) ----------------
+     * The textual mirror of the chart overlay: the app draws it on the price
+     * axis, the API returns the same content as rows so a client that cannot
+     * draw still receives every published conclusion.
+     */
+
+    private fun chartScreen(chart: ChartPayload?, now: Instant): Screen {
+        if (chart == null) {
+            return Screen(
+                ScreenModel.SCREEN_CHART, "چارت زنده", "Live Chart",
+                listOf(
+                    Section(
+                        "فید", "Feed",
+                        listOf(
+                            Row(
+                                "فید زنده", "Live feed", NA,
+                                listOf(Badge("UNAVAILABLE", BadgeKind.ERROR)),
+                                noteFa = "فید بروکر در این اجرا ساخته نشد.",
+                                noteEn = "The broker feed was not built on this run."
+                            )
+                        )
+                    )
+                )
+            )
+        }
+
+        val q = chart.quote
+        val feed = mutableListOf(
+            Row(
+                "نماد", "Symbol", chart.symbol,
+                listOf(
+                    Badge(chart.venue, BadgeKind.INFO),
+                    Badge(q?.updateMode?.uppercase() ?: "NO_QUOTE",
+                        if (q?.updateMode.equals("streaming", true)) BadgeKind.FRESH else BadgeKind.WARN)
+                ),
+                noteFa = chart.venueLabel, noteEn = chart.venueLabel, emphasis = true
+            )
+        )
+        if (q != null) {
+            feed += Row(
+                "قیمت زنده", "Live price", "%.3f".format(q.last),
+                listOf(Badge(fmtSigned(q.changePct, 2) + "%", if ((q.changePct ?: 0.0) >= 0) BadgeKind.OK else BadgeKind.WARN)),
+                noteFa = "دریافت ${fmtAge(q.receivedAt, now)} · مهر جلسه ${q.quotedAt}",
+                noteEn = "received ${fmtAge(q.receivedAt, now)} · session stamp ${q.quotedAt}",
+                emphasis = true
+            )
+            feed += Row(
+                "خرید / فروش", "Bid / Ask",
+                "${fmtOrNa(q.bid, 3)} / ${fmtOrNa(q.ask, 3)}",
+                listOfNotNull(
+                    q.spreadBp?.let { Badge("%.1f bp".format(it), BadgeKind.INFO) }
+                        ?: Badge("DROPPED", BadgeKind.WARN)
+                ),
+                noteFa = if (q.bid == null) "اسپرد منتشرشدهٔ بروکر با آخرین قیمت هم‌خوان نبود و کنار گذاشته شد." else null,
+                noteEn = if (q.bid == null) "The venue's quoted spread disagreed with the last price and was dropped." else null
+            )
+            feed += Row(
+                "بازه روز", "Session range",
+                "${fmtOrNa(q.low, 2)} – ${fmtOrNa(q.high, 2)}",
+                noteFa = "باز ${fmtOrNa(q.open, 2)}", noteEn = "open ${fmtOrNa(q.open, 2)}"
+            )
+        }
+        feed += Row(
+            "سری کندل", "Candle series",
+            "${chart.series.candles.size} × ${chart.timeframe.code}",
+            listOf(
+                Badge("LIVE ${chart.series.liveBars}", if (chart.series.liveBars > 0) BadgeKind.OK else BadgeKind.WARN),
+                Badge("SEED ${chart.series.seededBars}", BadgeKind.PROXY)
+            ),
+            noteFa = chart.series.seedSource?.let {
+                "پیش‌بار از $it با ضریب ${"%.6f".format(chart.series.rebaseFactor ?: 1.0)} بازمقیاس شد"
+            },
+            noteEn = chart.series.seedSource?.let {
+                "seeded from $it, rebased by ${"%.6f".format(chart.series.rebaseFactor ?: 1.0)}"
+            }
+        )
+
+        val h = chart.headline
+        val verdict = listOf(
+            Row(
+                "جهت", "Direction", h.direction,
+                listOf(Badge(h.horizon, BadgeKind.INFO), Badge(h.signalState, badgeForState(h.signalState))),
+                emphasis = true
+            ),
+            Row("سوگیری", "Bias", fmtOrNa(h.bias, 1)),
+            Row("اطمینان", "Confidence", h.confidence?.let { "%.1f%%".format(it * 100) } ?: NA),
+            Row("رژیم", "Regime", h.regime),
+            Row(
+                "احتمال", "Probability", h.probabilityStatus,
+                listOf(Badge(h.probabilityStatus, BadgeKind.INFO))
+            )
+        ) + listOfNotNull(
+            h.killSwitch?.let {
+                Row("کلید قطع", "Kill switch", "ENGAGED", listOf(Badge("STOP", BadgeKind.ERROR)),
+                    noteFa = it, noteEn = it, emphasis = true)
+            }
+        )
+
+        val levels = chart.levels.map { l ->
+            Row(
+                l.labelFa, l.labelEn, "%.3f".format(l.price),
+                listOf(Badge(l.kind.name, levelBadge(l.kind)))
+            )
+        }.ifEmpty { listOf(Row("—", "No level anchored", NA)) }
+
+        val deltas = chart.deltas.map { d ->
+            Row(
+                d.labelFa, d.labelEn,
+                if (d.changed) "${d.previous} → ${d.current}" else d.current,
+                listOf(
+                    Badge(
+                        when {
+                            d.firstObservation -> "FIRST"
+                            d.changed && d.direction > 0 -> "UP"
+                            d.changed && d.direction < 0 -> "DOWN"
+                            d.changed -> "CHANGED"
+                            else -> "SAME"
+                        },
+                        when {
+                            !d.changed -> BadgeKind.INFO
+                            d.direction > 0 -> BadgeKind.OK
+                            d.direction < 0 -> BadgeKind.WARN
+                            else -> BadgeKind.INFO
+                        }
+                    )
+                ),
+                emphasis = d.changed
+            )
+        }
+
+        val dual = chart.dual.flatMap { d ->
+            listOf(
+                Row(
+                    d.primary.labelFa, d.primary.labelEn, d.primary.direction,
+                    listOf(
+                        Badge(d.kind.name, BadgeKind.WARN),
+                        Badge("قوت %.2f".format(d.primary.strength), BadgeKind.INFO)
+                    ),
+                    noteFa = d.primary.detailFa, noteEn = d.primary.detailEn, emphasis = true
+                ),
+                Row(
+                    d.secondary.labelFa, d.secondary.labelEn, d.secondary.direction,
+                    listOf(
+                        Badge("خوانش دوم / second reading", BadgeKind.WARN),
+                        Badge("قوت %.2f".format(d.secondary.strength), BadgeKind.INFO)
+                    ),
+                    noteFa = d.secondary.detailFa, noteEn = d.secondary.detailEn, emphasis = true
+                ),
+                Row("دلیل", "Reason", "—", noteFa = d.reasonFa, noteEn = d.reasonEn)
+            )
+        }.ifEmpty {
+            listOf(
+                Row(
+                    "خوانش دوگانه", "Dual reading", "NONE",
+                    listOf(Badge("SINGLE", BadgeKind.OK)),
+                    noteFa = "افق‌ها و فاکتورها هم‌جهت‌اند.",
+                    noteEn = "Horizons and factors agree."
+                )
+            )
+        }
+
+        val exceptions = chart.exceptions.map { e ->
+            Row(
+                e.code, e.code, e.component,
+                listOf(Badge(e.severity, if (e.severity == "ERROR") BadgeKind.ERROR else BadgeKind.WARN)),
+                noteFa = e.messageFa, noteEn = e.messageEn, emphasis = e.severity == "ERROR"
+            )
+        }.ifEmpty { listOf(Row("—", "No exception", "CLEAN", listOf(Badge("OK", BadgeKind.OK)))) }
+
+        return Screen(
+            ScreenModel.SCREEN_CHART, "چارت زنده", "Live Chart",
+            listOf(
+                Section("فید بروکر", "Broker Feed", feed),
+                Section("تحلیل نهایی روی چارت", "Final Analysis On Chart", verdict),
+                Section("سطوح قفل‌شده به قیمت", "Price-Anchored Levels", levels),
+                Section("تغییر نسبت به اجرای قبلی", "Change Since Last Refresh", deltas),
+                Section("تحلیل دوگانه", "Dual Analysis", dual),
+                Section("اکسپشن‌ها", "Exceptions", exceptions)
+            )
+        )
+    }
+
+    private fun levelBadge(kind: LevelKind): BadgeKind = when (kind) {
+        LevelKind.SPOT -> BadgeKind.FRESH
+        LevelKind.BID, LevelKind.ASK -> BadgeKind.INFO
+        LevelKind.INVALIDATION -> BadgeKind.ERROR
+        LevelKind.EXPECTED_MOVE -> BadgeKind.OK
+        LevelKind.BAND_HIGH, LevelKind.BAND_LOW -> BadgeKind.INFO
+        LevelKind.BENCHMARK -> BadgeKind.PROXY
+    }
+
+    private fun fmtOrNa(v: Double?, digits: Int): String =
+        if (v == null) NA else "%.${digits}f".format(v)
+
+    private fun fmtSigned(v: Double?, digits: Int): String =
+        if (v == null) NA else "%+.${digits}f".format(v)
+
+    private fun fmtAge(at: Instant, now: Instant): String {
+        val s = java.time.Duration.between(at, now).seconds
+        return when {
+            s < 0 -> "now"
+            s < 90 -> "${s}s ago"
+            s < 5400 -> "${s / 60}m ago"
+            else -> "${s / 3600}h ago"
+        }
     }
 
     /* ---------------- Screen 7 — LOGS (SPEC v2.1 §21) ----------------

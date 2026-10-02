@@ -33,6 +33,8 @@ subscription. See [`NOTICE`](NOTICE) for licence and attribution terms.
 | Need | Provider | Endpoint |
 |---|---|---|
 | Spot gold / silver | gold-api.com | `api.gold-api.com/price/XAU`, `/XAG` |
+| **Live chart quote and forming bar (XAU/USD, OANDA / FXCM / FOREX.com)** | TradingView public screener | `scanner.tradingview.com/global/scan`, interval columns `open\|60`, `high\|60`, … |
+| **Chart seed history** | Kraken | `api.kraken.com/0/public/OHLC?pair=PAXGUSD&interval=…` |
 | Delayed quotes (GLD, SLV, TIP, HYG, LQD, UUP, USO, SPY, TLT, GDX, VIX, GVZ, SKEW, OVX) | Cboe Global Markets | `cdn.cboe.com/api/global/delayed_quotes/quotes/{SYM}.json` |
 | Daily history | Cboe Global Markets | `cdn.cboe.com/api/global/delayed_quotes/charts/historical/{SYM}.json` |
 | Nominal and real Treasury curve | U.S. Treasury | `home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all` |
@@ -113,6 +115,8 @@ unsigned APK.
 | `GET` | `/v1/stream` | Server-sent events, one message per refresh |
 | `GET` | `/v1/logs` | Logger screen model: summary, per-stage tally, failures, per-indicator status, trace |
 | `GET` | `/v1/logs.json` | Structured log; `?level=`, `?stage=`, `?key=`, `?q=`, `?limit=` narrow the result |
+| `GET` | `/v1/chart` | Live chart surface as rows: feed, verdict, anchored levels, deltas, dual analysis, exceptions |
+| `GET` | `/v1/chart.json` | Candles plus the overlay exactly as the app draws them |
 | `GET` | `/v1/logs.md` | The complete log as a Markdown file download |
 | `GET` | `/v1/logs.txt` | The complete log as a plain-text file download |
 
@@ -129,7 +133,8 @@ timestamp of the snapshot it was produced from.
 4. **Horizons** — 5m, 15m, 1H, 4H, 1D, 1W with direction, probability status, confidence, coverage and kill-switch state.
 5. **Events & News** — scheduled events and news records when a source is configured; otherwise an explicit statement that no free source exists.
 6. **Diagnostics** — provider health, quality tally, information dominance, market depth, the COMEX forward curve, and the resolution state of every former data gap with the live source that closed it.
-7. **Logger** — a separate tab, fed only by the diagnostic log: error and warning tally, per-stage counts, the failure list, a per-indicator status line naming which indicator failed and why, and the full trace. It can be filtered by level and by text, copied to the clipboard, and saved as `.md` or `.txt` through the system file picker. No market value is rendered on this screen and no log line is rendered on the other six.
+7. **Live Chart** — candles for XAU/USD from the selected retail venue (OANDA by default, FXCM and FOREX.com selectable) with the engine's own output drawn in the same coordinate space: live price, bid/ask, the expected-move band and its P5/P95 edges, the LBMA benchmark, what changed since the previous refresh, both readings whenever the engine holds two, and every exception. Timeframes 5m / 15m / 1H / 4H / 1D.
+8. **Logger** — a separate tab, fed only by the diagnostic log: error and warning tally, per-stage counts, the failure list, a per-indicator status line naming which indicator failed and why, and the full trace. It can be filtered by level and by text, copied to the clipboard, and saved as `.md` or `.txt` through the system file picker. No market value is rendered on this screen and no log line is rendered on the other six.
 
 The Android app can run in two modes. In **direct** mode it performs ingestion
 on the device using the `client` module. In **remote** mode it consumes
@@ -151,6 +156,8 @@ surfaced in the application rather than hidden:
 - **The LBMA benchmark series is monthly** (World Gold Council). The daily AM/PM fixes require an LBMA licence, so the deviation of spot from benchmark is reported at monthly resolution.
 - **The India premium carries a structural duty and GST wedge** of roughly nine percentage points, which is subtracted before the premium is scored.
 - **Historical analogue matching is not implemented** because the historical dataset it requires does not exist in this stack.
+- **The chart's seed bars are rebased, not borrowed silently.** On first launch the series is seeded from Kraken PAXG/USD and multiplied by `brokerLast / seedLast`; those bars are drawn hollow, counted separately, and the factor is published. Bars printed by the selected venue replace them as they are sealed.
+- **The venue's quoted bid/ask is dropped when it disagrees with the last price** by more than 25 bp, because the screener caches the two independently. The drop is stated on screen and logged.
 - Every one of the above is reported on the Diagnostics screen with its live source, and every ingestion step is traceable on the Logger screen.
 
 ---
