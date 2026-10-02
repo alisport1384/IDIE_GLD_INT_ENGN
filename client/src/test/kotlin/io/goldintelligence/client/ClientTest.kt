@@ -532,4 +532,32 @@ class ChartTest {
             spotPrice = 4200.0
         )
     }
+
+    /** A chart exception must never be re-wrapped on the next refresh. */
+    @Test
+    fun `chart exceptions are not nested across refreshes`() {
+        val log = io.goldintelligence.engine.DiagnosticLog()
+        val builder = ChartOverlayBuilder(log)
+        val empty = ChartSeries("OANDA:XAUUSD", "OANDA", ChartTimeframe.H1, emptyList(), null, null, 0, 0)
+        repeat(3) {
+            builder.build(
+                report = null, quote = null, series = empty,
+                venue = BrokerFeedProvider.DEFAULT, previous = null,
+                feedFailure = "FEED_UNAVAILABLE", now = now
+            )
+        }
+        val payload = builder.build(
+            report = null, quote = null, series = empty,
+            venue = BrokerFeedProvider.DEFAULT, previous = null,
+            feedFailure = "FEED_UNAVAILABLE", now = now
+        )
+        assertTrue(
+            "no exception code is nested",
+            payload.exceptions.none { it.code.startsWith("CHART_EXCEPTION_") }
+        )
+        assertTrue(
+            "no log code is doubly prefixed",
+            log.snapshot().none { it.code.startsWith("CHART_EXCEPTION_CHART_EXCEPTION_") }
+        )
+    }
 }

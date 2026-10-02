@@ -28,6 +28,8 @@ class ChartOverlayBuilder(private val log: DiagnosticLog = DiagnosticLog.shared)
         val LONG: Set<Horizon> = setOf(Horizon.H4, Horizon.D1, Horizon.W1)
 
         /** A factor must be at least this strong to count as a side of a conflict. */
+        /** Prefix used when re-emitting a chart exception into the log. */
+        const val EXCEPTION_PREFIX = "CHART_EXCEPTION_"
         const val CONFLICT_FLOOR = 25.0
 
         /** Below this, two opposing camps are not a genuine conflict, just noise. */
@@ -449,8 +451,15 @@ class ChartOverlayBuilder(private val log: DiagnosticLog = DiagnosticLog.shared)
 
         // Anything the rest of the pipeline logged as an error this refresh is
         // surfaced on the chart too, so a silent failure cannot hide behind it.
+        // The chart's own re-emissions are excluded, otherwise each refresh
+        // would wrap the previous refresh's entry and the codes would nest.
         log.failures()
-            .filter { it.level == LogLevel.ERROR }
+            .filter {
+                it.level == LogLevel.ERROR &&
+                    it.stage != LogStage.CHART &&
+                    !it.code.startsWith(EXCEPTION_PREFIX)
+            }
+            .distinctBy { it.code to it.component }
             .takeLast(3)
             .forEach { e ->
                 out += ChartException(
@@ -468,7 +477,7 @@ class ChartOverlayBuilder(private val log: DiagnosticLog = DiagnosticLog.shared)
                 level = if (it.severity == "ERROR") LogLevel.ERROR else LogLevel.WARN,
                 stage = LogStage.CHART,
                 component = "ChartOverlayBuilder",
-                code = "CHART_EXCEPTION_" + it.code,
+                code = EXCEPTION_PREFIX + it.code,
                 message = it.messageEn,
                 key = CHART_KEY
             )
