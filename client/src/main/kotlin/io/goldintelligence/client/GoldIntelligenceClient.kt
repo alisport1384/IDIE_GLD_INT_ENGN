@@ -89,7 +89,13 @@ class GoldIntelligenceClient(
             universe = universe,
             features = features,
             diagnostics = factors.diagnostics,
-            screens = screenBuilder.build(report, universe, features, factors.diagnostics)
+            screens = screenBuilder.build(
+                report, universe, features, factors.diagnostics,
+                calendar = aggregator.lastCalendar,
+                books = aggregator.lastBooks,
+                otcTiers = aggregator.lastOtcTiers,
+                goldCurve = aggregator.lastGoldCurve
+            )
         )
     }
 

@@ -60,7 +60,7 @@ object IndicatorCatalog {
         Indicator(FeatureKeys.COT_EXTREME_LONG, "F11_FUTURES_POSITIONING", "حد نهایی خرید", "COT Extreme Long", "flag"),
         Indicator(FeatureKeys.COT_EXTREME_SHORT, "F11_FUTURES_POSITIONING", "حد نهایی فروش", "COT Extreme Short", "flag"),
 
-        Indicator(FeatureKeys.PHYSICAL_DEMAND_INDEX, "F12_PHYSICAL_DEMAND", "شاخص تقاضای فیزیکی", "Physical Demand Index", "idx"),
+        Indicator(FeatureKeys.PHYSICAL_DEMAND_INDEX, "F12_PHYSICAL_DEMAND", "شاخص تقاضای فیزیکی", "Physical Demand Index", "%"),
 
         Indicator(FeatureKeys.GOLD_MOMENTUM, "F13_MARKET_MOMENTUM", "مومنتوم طلا", "Gold Momentum", "composite"),
         Indicator(FeatureKeys.GOLD_RETURN, "F13_MARKET_MOMENTUM", "بازده طلا", "Gold Return", "%"),
@@ -85,7 +85,47 @@ object IndicatorCatalog {
         Indicator(FeatureKeys.OIL_MOMENTUM, "F21_OIL_ENERGY", "مومنتوم نفت", "Oil Momentum", "%"),
         Indicator(FeatureKeys.GLOBAL_CB_POLICY_DIVERGENCE, "F22_GLOBAL_CB_POLICY", "واگرایی سیاست پولی جهانی", "Global Policy Divergence", "idx"),
 
-        Indicator(FeatureKeys.RECESSION_PROBABILITY, "F06_ECONOMIC_SURPRISE", "احتمال رکود", "Recession Probability", "p")
+        Indicator(FeatureKeys.RECESSION_PROBABILITY, "F06_ECONOMIC_SURPRISE", "احتمال رکود", "Recession Probability", "p"),
+
+        /* ---- SPEC v2.1 — indicators unlocked when the paid gaps closed ---- */
+        Indicator(FeatureKeys.BOOK_IMBALANCE, "F14_MARKET_MICROSTRUCTURE",
+            "عدم‌تعادل دفتر سفارش", "Order Book Imbalance", "-1..1"),
+        Indicator(FeatureKeys.BOOK_DEPTH_TOTAL, "F14_MARKET_MICROSTRUCTURE",
+            "عمق کل دفتر سفارش", "Total Book Depth", "oz"),
+        Indicator(FeatureKeys.BOOK_SPREAD_BP, "F14_MARKET_MICROSTRUCTURE",
+            "اسپرد بهترین قیمت", "Top-of-Book Spread", "bp"),
+        Indicator(FeatureKeys.OTC_SPREAD_BP, "F14_MARKET_MICROSTRUCTURE",
+            "اسپرد بازار خارج از بورس", "OTC Spread", "bp"),
+
+        Indicator(FeatureKeys.OPEN_INTEREST, "F11_FUTURES_POSITIONING",
+            "بهره باز روزانه", "Daily Open Interest", "contracts"),
+        Indicator(FeatureKeys.OPEN_INTEREST_ZSCORE, "F11_FUTURES_POSITIONING",
+            "Z بهره باز", "Open Interest Z-Score", "z"),
+        Indicator(FeatureKeys.OPEN_INTEREST_CHANGE, "F11_FUTURES_POSITIONING",
+            "تغییر بهره باز", "Open Interest Change", "%"),
+
+        Indicator(FeatureKeys.CHINA_PREMIUM, "F19_CHINA",
+            "پریمیوم فیزیکی شانگهای", "Shanghai Physical Premium", "%"),
+        Indicator(FeatureKeys.INDIA_PREMIUM, "F20_INDIA",
+            "پریمیوم فیزیکی هند", "India Physical Premium", "%"),
+
+        Indicator(FeatureKeys.LBMA_BENCHMARK, "F16_CROSS_ASSET",
+            "بنچمارک LBMA", "LBMA Benchmark", "USD/oz"),
+        Indicator(FeatureKeys.LBMA_DEVIATION, "F16_CROSS_ASSET",
+            "انحراف از بنچمارک", "Benchmark Deviation", "%"),
+        Indicator(FeatureKeys.SPOT_SOURCE_DISPERSION, "F16_CROSS_ASSET",
+            "پراکندگی منابع قیمت نقدی", "Spot Source Dispersion", "bp"),
+
+        Indicator(FeatureKeys.CALENDAR_HIGH_IMPACT_24H, "F06_ECONOMIC_SURPRISE",
+            "رویدادهای پراهمیت ۲۴ ساعت آینده", "High-Impact Events (24h)", "events"),
+        Indicator(FeatureKeys.CALENDAR_HOURS_TO_EVENT, "F06_ECONOMIC_SURPRISE",
+            "ساعت تا رویداد بعدی", "Hours to Next Event", "h"),
+        Indicator(FeatureKeys.CONSENSUS_SURPRISE, "F05_INFLATION",
+            "شگفتی نسبت به اجماع", "Consensus Surprise", "normalized"),
+        Indicator(FeatureKeys.CPI_YOY, "F05_INFLATION",
+            "تورم سالانه CPI", "CPI Year-over-Year", "%"),
+        Indicator(FeatureKeys.UNEMPLOYMENT_RATE, "F06_ECONOMIC_SURPRISE",
+            "نرخ بیکاری", "Unemployment Rate", "%")
     )
 
     val byFactor: Map<String, List<Indicator>> = indicators.groupBy { it.factorId }

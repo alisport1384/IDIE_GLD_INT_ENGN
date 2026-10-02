@@ -9,6 +9,8 @@ import io.goldintelligence.client.JsonWriter
 import io.goldintelligence.client.Screen
 import io.goldintelligence.client.ScreenModel
 import io.goldintelligence.client.ScreenModelCodec
+import io.goldintelligence.engine.DiagnosticLog
+import io.goldintelligence.engine.LogLevel
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
@@ -49,6 +51,16 @@ class IntelligenceServer(
         server.createContext("/v1/horizons") { ex -> json(ex, screen(ScreenModel.SCREEN_HORIZONS)) }
         server.createContext("/v1/events") { ex -> json(ex, screen(ScreenModel.SCREEN_EVENTS)) }
         server.createContext("/v1/diagnostics") { ex -> json(ex, screen(ScreenModel.SCREEN_DIAGNOSTICS)) }
+        // SPEC v2.1 §21 — the operational log, on its own endpoints so it is
+        // never mixed into an analytical payload.
+        server.createContext("/v1/logs") { ex -> json(ex, screen(ScreenModel.SCREEN_LOGS)) }
+        server.createContext("/v1/logs.json") { ex -> json(ex, logsJson(ex)) }
+        server.createContext("/v1/logs.md") { ex ->
+            download(ex, "text/markdown", "gold-intelligence-log.md", DiagnosticLog.shared.toMarkdown(logHeader()))
+        }
+        server.createContext("/v1/logs.txt") { ex ->
+            download(ex, "text/plain", "gold-intelligence-log.txt", DiagnosticLog.shared.toPlainText(logHeader()))
+        }
         server.createContext("/v1/report") { ex -> json(ex, reportJson()) }
         server.createContext("/v1/stream") { ex -> stream(ex) }
         server.createContext("/") { ex -> json(ex, index()) }
@@ -157,10 +169,79 @@ class IntelligenceServer(
         "endpoints" to JsonWriter.arr(
             listOf(
                 "/v1/health", "/v1/screens", "/v1/state", "/v1/factors", "/v1/indicators",
-                "/v1/horizons", "/v1/events", "/v1/diagnostics", "/v1/report", "/v1/stream"
+                "/v1/horizons", "/v1/events", "/v1/diagnostics", "/v1/report", "/v1/stream",
+                "/v1/logs", "/v1/logs.json", "/v1/logs.md", "/v1/logs.txt"
             )
         ) { JsonWriter.str(it) }
     )
+
+    private fun logHeader(): Map<String, String> = linkedMapOf(
+        "spec" to io.goldintelligence.engine.MultiHorizonEngine.SPEC_VERSION,
+        "source" to "server",
+        "lastRefresh" to (lastRefresh.get()?.toString() ?: "never")
+    )
+
+    /**
+     * Structured log as JSON. `?level=WARN&stage=NETWORK&q=treasury&limit=500`
+     * narrow the result; defaults return the whole ring.
+     */
+    private fun logsJson(ex: HttpExchange): String {
+        val q = (ex.requestURI.query ?: "").split('&')
+            .mapNotNull { it.split('=', limit = 2).takeIf { p -> p.size == 2 } }
+            .associate { java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it[1], "UTF-8") }
+        val level = q["level"]?.uppercase()?.let { name -> LogLevel.entries.firstOrNull { it.name == name } }
+            ?: LogLevel.TRACE
+        val stage = q["stage"]?.uppercase()?.let { name ->
+            io.goldintelligence.engine.LogStage.entries.firstOrNull { it.name == name }
+        }
+        val limit = q["limit"]?.toIntOrNull() ?: 1000
+        val entries = DiagnosticLog.shared.filter(level, stage, q["key"], q["q"]).takeLast(limit)
+        val counts = DiagnosticLog.shared.countsByLevel()
+        return JsonWriter.obj(
+            "generatedAt" to JsonWriter.str(Instant.now().toString()),
+            "total" to JsonWriter.num(DiagnosticLog.shared.snapshot().size),
+            "returned" to JsonWriter.num(entries.size),
+            "dropped" to JsonWriter.num(DiagnosticLog.shared.droppedCount().toInt()),
+            "counts" to JsonWriter.obj(*counts.map { (k, v) -> k.name to JsonWriter.num(v) }.toTypedArray()),
+            "indicators" to JsonWriter.arr(DiagnosticLog.shared.indicatorStatuses()) { st ->
+                JsonWriter.obj(
+                    "key" to JsonWriter.str(st.key),
+                    "ok" to JsonWriter.bool(st.ok),
+                    "level" to JsonWriter.str(st.level.name),
+                    "code" to JsonWriter.str(st.code),
+                    "component" to JsonWriter.str(st.component),
+                    "message" to JsonWriter.str(st.message),
+                    "timestamp" to JsonWriter.str(st.timestamp.toString())
+                )
+            },
+            "entries" to JsonWriter.arr(entries) { e ->
+                JsonWriter.obj(
+                    "seq" to JsonWriter.num(e.sequence.toInt()),
+                    "timestamp" to JsonWriter.str(e.timestamp.toString()),
+                    "level" to JsonWriter.str(e.level.name),
+                    "stage" to JsonWriter.str(e.stage.name),
+                    "component" to JsonWriter.str(e.component),
+                    "code" to JsonWriter.str(e.code),
+                    "message" to JsonWriter.str(e.message),
+                    "key" to JsonWriter.str(e.key),
+                    "url" to JsonWriter.str(e.url),
+                    "httpStatus" to JsonWriter.num(e.httpStatus),
+                    "latencyMillis" to JsonWriter.num(e.latencyMillis?.toInt()),
+                    "detail" to JsonWriter.str(e.detail)
+                )
+            }
+        )
+    }
+
+    private fun download(ex: HttpExchange, contentType: String, filename: String, body: String) {
+        val bytes = body.toByteArray(StandardCharsets.UTF_8)
+        ex.responseHeaders.add("Content-Type", "$contentType; charset=utf-8")
+        ex.responseHeaders.add("Content-Disposition", "attachment; filename=\"$filename\"")
+        ex.responseHeaders.add("Access-Control-Allow-Origin", "*")
+        ex.responseHeaders.add("Cache-Control", "no-store")
+        ex.sendResponseHeaders(200, bytes.size.toLong())
+        ex.responseBody.use { it.write(bytes) }
+    }
 
     private fun json(ex: HttpExchange, body: String) {
         val bytes = body.toByteArray(StandardCharsets.UTF_8)

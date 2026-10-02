@@ -58,7 +58,62 @@ object Providers {
         "Derived values only; raw redistribution is not licensed."
     )
 
-    val all = listOf(CBOE, GOLD_API, TREASURY, CFTC, NY_FED, ECB_FX, YAHOO)
+    val TRADINGVIEW = ProviderSpec(
+        "TRADINGVIEW", "TradingView screener", "https://scanner.tradingview.com",
+        LicenseClass.ATTRIBUTION, Tier.B,
+        "Quotes and open interest via the TradingView screener"
+    )
+    val KRAKEN = ProviderSpec(
+        "KRAKEN", "Kraken (PAXG allocated gold)", "https://api.kraken.com",
+        LicenseClass.ATTRIBUTION, Tier.B,
+        "Order book and candles for PAXG/USD"
+    )
+    val OKX = ProviderSpec(
+        "OKX", "OKX (XAUT tokenised gold)", "https://www.okx.com",
+        LicenseClass.ATTRIBUTION, Tier.B,
+        "Order book and candles for XAUT/USDT"
+    )
+    val SWISSQUOTE = ProviderSpec(
+        "SWISSQUOTE", "Swissquote OTC gold", "https://forex-data-feed.swissquote.com",
+        LicenseClass.ATTRIBUTION, Tier.B,
+        "Public best-bid/offer quotes by size tier"
+    )
+    val SINA_SGE = ProviderSpec(
+        "SINA_SGE", "Shanghai Gold Exchange Au(T+D) via Sina", "https://hq.sinajs.cn",
+        LicenseClass.ATTRIBUTION, Tier.C,
+        "Shanghai Gold Exchange deferred contract quote"
+    )
+    val EASTMONEY_SGE = ProviderSpec(
+        "EASTMONEY_SGE", "Shanghai Au(T+D) via Eastmoney (backup)", "https://push2.eastmoney.com",
+        LicenseClass.ATTRIBUTION, Tier.C,
+        "Backup quote for the Shanghai Gold Exchange deferred contract"
+    )
+    val FOREXFACTORY = ProviderSpec(
+        "FOREXFACTORY", "ForexFactory economic calendar", "https://nfs.faireconomy.media",
+        LicenseClass.ATTRIBUTION, Tier.C,
+        "Scheduled releases with surveyed consensus forecasts"
+    )
+    val BLS = ProviderSpec(
+        "BLS", "U.S. Bureau of Labor Statistics", "https://api.bls.gov",
+        LicenseClass.PUBLIC_DOMAIN, Tier.A,
+        "Consumer Price Index and labour statistics — public domain"
+    )
+    val GOLDPRICE_ORG = ProviderSpec(
+        "GOLDPRICE_ORG", "goldprice.org", "https://data-asg.goldprice.org",
+        LicenseClass.ATTRIBUTION, Tier.C,
+        "Independent spot cross-check"
+    )
+    val WGC = ProviderSpec(
+        "WGC", "World Gold Council (LBMA benchmark)", "https://fsapi.gold.org",
+        LicenseClass.ATTRIBUTION, Tier.A,
+        "LBMA-based gold benchmark series published by the World Gold Council"
+    )
+
+    val all = listOf(
+        CBOE, GOLD_API, TREASURY, CFTC, NY_FED, ECB_FX, YAHOO,
+        TRADINGVIEW, KRAKEN, OKX, SWISSQUOTE, SINA_SGE, EASTMONEY_SGE,
+        FOREXFACTORY, BLS, GOLDPRICE_ORG, WGC
+    )
 }
 
 /* ------------------------------------------------------------------ */

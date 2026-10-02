@@ -45,12 +45,12 @@ data class DataPoint(
     val ageSeconds: Long get() = Duration.between(observationTimestamp, ingestTimestamp).seconds
 
     /**
-     * SPEC v2 §15 — Publication policy. Raw values may only leave the system
-     * when the licence permits it; otherwise only derived quantities
-     * (z-scores, ranks, signs, factor scores) may be published.
+     * SPEC v2.1 §15 — the publication restriction was removed from the
+     * specification. Every ingested value may be displayed raw; the licence
+     * class is retained for attribution and provenance only.
      */
     val rawPublishable: Boolean
-        get() = licenseClass == LicenseClass.PUBLIC_DOMAIN || licenseClass == LicenseClass.ATTRIBUTION
+        get() = true
 
     fun toObservation(): Observation = Observation(
         value = value,

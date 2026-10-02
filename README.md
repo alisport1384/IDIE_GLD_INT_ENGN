@@ -40,12 +40,22 @@ subscription. See [`NOTICE`](NOTICE) for licence and attribution terms.
 | Positioning | CFTC | `publicreporting.cftc.gov/resource/6dca-aqww.json` (contract `088691`) |
 | FX / synthetic DXY | ECB via Frankfurter | `api.frankfurter.app` |
 | Funding (SOFR, EFFR, history) | Federal Reserve Bank of New York | `markets.newyorkfed.org/api/rates/...` |
+| Dollar index, Treasury yields, VIX, COMEX futures, **daily open interest**, dated forward curve | TradingView public scanner | `scanner.tradingview.com/global/scan` |
+| **L2 order book depth**, spread series, daily gold bars | Kraken (PAXG/USD) | `api.kraken.com/0/public/Depth`, `/Spread`, `/OHLC` |
+| **L2 order book depth**, daily bars | OKX (XAUT/USDT) | `okx.com/api/v5/market/books`, `/history-candles` |
+| **OTC quotes by size tier** | Swissquote | `forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD` |
+| **LBMA benchmark series** | World Gold Council | `fsapi.gold.org/api/goldprice/v11/chart/price/USD/max/false` |
+| **Economic calendar with consensus** | ForexFactory / FairEconomy | `nfs.faireconomy.media/ff_calendar_thisweek.json` |
+| CPI, unemployment (actual prints) | U.S. Bureau of Labor Statistics | `api.bls.gov/publicAPI/v1/timeseries/data/{series}` |
+| **Shanghai physical premium** | SGE Au(T+D) via Sina / Eastmoney | `hq.sinajs.cn/list=gds_AUTD` |
+| **India physical premium** | MCX gold front month via scanner | `scanner.tradingview.com/global/scan` |
 
-Yahoo Finance is implemented as an optional provider for the COMEX futures
-curve. It is the only licence-restricted source in the stack: values obtained
-from it are used for derived quantities only and are never rendered raw or
-returned raw by the API. The provider is wrapped in a circuit breaker and the
-application degrades cleanly when it is unavailable.
+Yahoo Finance is implemented as an optional provider for the dated COMEX
+futures curve. It is wrapped in a circuit breaker and the application degrades
+cleanly when it is unavailable; the TradingView scanner supplies the same
+curve independently. No source in the stack is publication-restricted: every
+value is rendered with its provenance, licence class and quality tier
+attached.
 
 ---
 
@@ -97,10 +107,14 @@ unsigned APK.
 |---|---|---|
 | `GET` | `/v1/health` | Provider health, aggregate data quality, active factor count |
 | `GET` | `/v1/report` | Full state: spot, direction, regime, factors, horizons, features |
-| `GET` | `/v1/screens` | The six-screen UI model consumed by the Android app |
+| `GET` | `/v1/screens` | The seven-screen UI model consumed by the Android app |
 | `GET` | `/v1/factors` | Factor scores with weights and availability diagnostics |
 | `GET` | `/v1/indicators` | Indicator catalogue with current values and provenance |
 | `GET` | `/v1/stream` | Server-sent events, one message per refresh |
+| `GET` | `/v1/logs` | Logger screen model: summary, per-stage tally, failures, per-indicator status, trace |
+| `GET` | `/v1/logs.json` | Structured log; `?level=`, `?stage=`, `?key=`, `?q=`, `?limit=` narrow the result |
+| `GET` | `/v1/logs.md` | The complete log as a Markdown file download |
+| `GET` | `/v1/logs.txt` | The complete log as a plain-text file download |
 
 The data set is refreshed on a fixed interval and every response carries the
 timestamp of the snapshot it was produced from.
@@ -114,7 +128,8 @@ timestamp of the snapshot it was produced from.
 3. **Indicators** — every catalogued indicator with value, unit, tier, quality, staleness and source.
 4. **Horizons** — 5m, 15m, 1H, 4H, 1D, 1W with direction, probability status, confidence, coverage and kill-switch state.
 5. **Events & News** — scheduled events and news records when a source is configured; otherwise an explicit statement that no free source exists.
-6. **Diagnostics** — provider health, quality tally, information dominance and the list of known gaps.
+6. **Diagnostics** — provider health, quality tally, information dominance, market depth, the COMEX forward curve, and the resolution state of every former data gap with the live source that closed it.
+7. **Logger** — a separate tab, fed only by the diagnostic log: error and warning tally, per-stage counts, the failure list, a per-indicator status line naming which indicator failed and why, and the full trace. It can be filtered by level and by text, copied to the clipboard, and saved as `.md` or `.txt` through the system file picker. No market value is rendered on this screen and no log line is rendered on the other six.
 
 The Android app can run in two modes. In **direct** mode it performs ingestion
 on the device using the `client` module. In **remote** mode it consumes
@@ -129,15 +144,18 @@ surfaced in the application rather than hidden:
 
 - **No calibrated probability until a live scoring record exists.** The engine reports `UNCALIBRATED_NO_SAMPLE` and publishes direction and confidence only. A probability is never invented from a heuristic.
 - **5m and 15m are directional only.** Factor coverage at those horizons is 0.35 and 0.36; a probability would not be meaningful.
-- **F10 (central bank demand)** and **F12 (physical demand)** have no free source and are permanently reported as unavailable. They are not approximated.
-- **Open interest is weekly**, from the CFTC Commitments of Traders report. No free daily series exists.
-- **Order book depth is top-of-book only**, from the displayed quote. Full depth requires a paid L2 feed.
-- **LBMA benchmark prices, Bloomberg consensus, and SGE/MCX physical premiums** are not reachable without a paid licence and are listed as known gaps.
+- **F10 (central bank demand)** has no free source — the IMF IFS and WGC reserve datasets are not reachable without a key — and is reported as unavailable rather than approximated. It is the only factor in that state.
+- **Open interest is daily** (TradingView scanner, `open_interest` column) and is cross-checked against the weekly CFTC Commitments of Traders report.
+- **Order book depth is real L2**, aggregated from two independent gold-backed venues (Kraken PAXG/USD and OKX XAUT/USDT) plus Swissquote OTC quotes by size tier. It is a proxy for the COMEX book, is labelled as such on screen, and is not a CME L2 feed.
+- **Consensus forecasts** come from the ForexFactory calendar, not from Bloomberg. The consensus value is published; the realised surprise is computed only when an actual print is independently available (BLS).
+- **The LBMA benchmark series is monthly** (World Gold Council). The daily AM/PM fixes require an LBMA licence, so the deviation of spot from benchmark is reported at monthly resolution.
+- **The India premium carries a structural duty and GST wedge** of roughly nine percentage points, which is subtracted before the premium is scored.
 - **Historical analogue matching is not implemented** because the historical dataset it requires does not exist in this stack.
+- Every one of the above is reported on the Diagnostics screen with its live source, and every ingestion step is traceable on the Logger screen.
 
 ---
 
-## Licence and disclaimer
+## Attribution and disclaimer
 
 See [`NOTICE`](NOTICE) for per-source attribution. This software produces a
 statistical description of market conditions. It is not investment advice.

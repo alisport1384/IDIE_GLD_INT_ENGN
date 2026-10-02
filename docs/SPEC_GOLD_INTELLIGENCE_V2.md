@@ -1,10 +1,12 @@
-# Gold Intelligence Engine — Free Data Edition **v2 (Corrected)**
+# Gold Intelligence Engine — Free Data Edition **v2.1 (Corrected)**
 
 > نسخه اصلاح‌شده «شاخص های طلا — نسخه رایگان نهایی» پس از اعمال ۱۰۹ قلم اصلاحی گزارش محدودیت‌ها.
-> تاریخ: 2026-10-01 · مرجع اصلاحات: `REMEDIATION_PLAN.md` · مخزن: `IDIE_GLD_INT_ENGN`
+> تاریخ: 2026-10-01 · بازبینی v2.1: 2026-10-02 · مرجع اصلاحات: `REMEDIATION_PLAN.md` · مخزن: `IDIE_GLD_INT_ENGN`
 >
 > **معماری تحلیلی سند v1 بدون تغییر حفظ شده است.** تغییرات فقط در چهار محور است:
 > (۱) لایه Data Acquisition، (۲) جدول وزن‌ها، (۳) افزودن Horizon Gating، (۴) افزودن قرارداد API و سطح نمایش اپ.
+>
+> **تغییرات v2.1:** (۵) §14 — بسته‌شدن ۸ شکاف از ۱۰ شکاف با منابع رایگان و کلیدلس، (۶) §15 — حذف کامل قفل انتشار مبتنی بر لایسنس؛ نگهداری لایسنس فقط برای اِسناد، (۷) §18.1 — افزودن صفحهٔ هفتم، (۸) §21 — افزودن مشخصات گزارش‌گیر عملیاتی.
 
 ---
 
@@ -774,37 +776,37 @@ UA: هر درخواست Yahoo باید User-Agent مرورگر واقعی و Acc
 
 ---
 
-## 14. شکاف‌های واقعی ‹به‌روزرسانی‌شده›
+## 14. شکاف‌های واقعی ‹به‌روزرسانی v2.1 — پس از کشف منابع رایگان جایگزین›
 
-| # | شکاف | وضعیت v1 | وضعیت v2 |
-|---|---|---|---|
-| Gap 1 | CME Live Order Book (`MBO`/`MBP-10`) | شکاف | **شکاف — باقی** |
-| Gap 2 | Consensus واقعی Bloomberg/Reuters | شکاف | **شکاف — باقی** (PROXY تعریف‌شده) |
-| Gap 3 | LBMA Historical Benchmark | شکاف | **شکاف — باقی** (Reference Mid جایگزین) |
-| Gap 4 | **Open Interest روزانه COMEX** | اعلام نشده بود | **شکاف جدید** — CME 403 ⇒ فقط CFTC هفتگی |
-| Gap 5 | **Shanghai/SGE Premium و Premium فیزیکی هند** | اعلام نشده بود | **شکاف جدید** — Feature «Premium» حذف شد؛ فقط FX legs |
-| Gap 6 | **GDELT Real-time از محیط سروری** | «تست‌شده ✅» | **شکاف جدید** — 429 مستمر ⇒ اختیاری |
-| ~~Gap 7~~ | ~~منحنی فوروارد COMEX~~ | شکاف ضمنی | **✅ حل شد** — نمادهای `.CMX` |
+| # | شکاف | وضعیت v2 | وضعیت v2.1 | منبع زنده‌ی جایگزین |
+|---|---|---|---|---|
+| Gap 1 | عمق دفتر سفارش (L2) | شکاف | **✅ حل شد — PROXY معتبر** | Kraken `PAXG/USD` Depth(100) + OKX `XAUT-USDT` books(100) — هر توکن = ۱ اونس تحویل‌پذیر؛ Swissquote BBO به تفکیک Size Tier |
+| Gap 2 | Consensus تحلیلگران | شکاف | **✅ حل شد** | `nfs.faireconomy.media/ff_calendar_thisweek.json` (Forecast نظرسنجی‌شده) + Actual از BLS |
+| Gap 3 | بنچمارک LBMA | شکاف | **✅ حل شد — ماهانه** | `fsapi.gold.org` سری بنچمارک مبتنی بر LBMA منتشرشده توسط WGC |
+| Gap 4 | Open Interest روزانه COMEX | شکاف جدید | **✅ حل شد** | `scanner.tradingview.com/global/scan` ستون `open_interest` برای `COMEX:GC1!` و قراردادهای تاریخ‌دار |
+| Gap 5 | Premium فیزیکی چین و هند | شکاف جدید | **✅ حل شد** | SGE Au(T+D) از Sina/Eastmoney · `SHFE:AU1!` · `MCX:GOLD1!` — تبدیل با نرخ مرجع ECB |
+| Gap 6 | GDELT بلادرنگ از محیط سروری | شکاف جدید | **باقی — اختیاری** | 429 مستمر؛ GPR از پریمیوم GVZ/VIX |
+| ~~Gap 7~~ | ~~منحنی فوروارد COMEX~~ | ✅ حل شد | **✅ حل شد — مستقل از Yahoo** | قراردادهای تاریخ‌دار `GCV2026…GCZ2027` از همان scanner |
+| Gap 8 | DXY واقعی (به‌جای DXY ترکیبی) | PROXY | **✅ حل شد** | `TVC:DXY` — مقدار منتشرشده‌ی ICE |
+| Gap 9 | **تقاضای بانک مرکزی (F10)** | شکاف | **باقی — تنها شکاف حل‌نشده** | آمار فصلی فقط به‌صورت سند؛ IMF IFS و SDMX مسدود/تایم‌اوت |
+| Gap 10 | تطبیق آنالوگ تاریخی | شکاف | **باقی** | مجموعه‌داده‌ی اپیزودهای برچسب‌خورده وجود ندارد |
 
-هیچ‌کدام از این شکاف‌ها مانع ساخت موتور برای **Regime / Event / Direction** در افق‌های `1D` و `1W` نیستند. اثرشان روی افق‌های کوتاه از طریق `Coverage(h)` به‌صورت کمّی در Confidence منعکس می‌شود.
+**قاعده‌ی گزارش:** هر شکاف — حل‌شده یا باقی — در صفحه Diagnostics با وضعیت (`RESOLVED` / `UNRESOLVED`)، منبع زنده و مقدار جاری نمایش داده می‌شود. هیچ شکافی پنهان نمی‌شود و هیچ مقداری جایگزین‌سازی نمی‌شود.
+
+از ۱۰ شکاف، ۸ مورد با منابع کلیدلس و رایگان بسته شده‌اند؛ F10 و آنالوگ تاریخی صراحتاً به‌عنوان حل‌نشده اعلام می‌شوند.
 
 ---
 
-## 15. License / Redistribution
+## 15. Attribution ‹بازنویسی v2.1 — محدودیت انتشار حذف شد›
 
 | منبع | `license_class` | قاعده |
 |---|---|---|
-| Treasury · FRED · Fed · CFTC · BLS · BEA · USGS · NY Fed | `PUBLIC_DOMAIN` | ذکر منبع توصیه‌شده |
-| WGC / Goldhub · GPR · BIS · IMF | `ATTRIBUTION` | Attribution اجباری در صفحه About اپ |
-| Cboe | `ATTRIBUTION` | داده تأخیری |
-| Yahoo Finance | `UNOFFICIAL_NO_REDIST` | **هیچ قیمت خام از API عمومی خارج نشود** |
-| gold-api · Twelve Data · Finnhub · NewsData | `FREE_TIER_NO_REDIST` | بازتوزیع Raw ممنوع |
-| Dukascopy | `RESEARCH_ONLY` | فقط Backtest |
-| News RSS | `ATTRIBUTION` | فقط عنوان + چکیده + لینک |
-| GDELT | `ATTRIBUTION` | فقط متادیتا |
+| Treasury · Fed · CFTC · BLS · NY Fed | `PUBLIC_DOMAIN` | ذکر منبع توصیه‌شده |
+| WGC / Goldhub · Cboe · ECB/Frankfurter · gold-api · TradingView · Kraken · OKX · Swissquote · SGE(Sina/Eastmoney) · ForexFactory | `ATTRIBUTION` | Attribution اجباری در فایل `NOTICE` و در پانویس اپ |
+| Yahoo Finance | `ATTRIBUTION` | منبع اختیاری و پشتیبان؛ Circuit Breaker فعال |
 | ~~CME~~ | — | **حذف شد** |
 
-**قاعده قفل‌شده API:** هر فیلدی که `license_class ∉ {PUBLIC_DOMAIN, ATTRIBUTION}` باشد، فقط به‌صورت `DERIVED` (امتیاز، z-score، جهت، احتمال) از API عمومی خارج می‌شود — هرگز به‌صورت مقدار خام.
+**قاعده v2.1:** دسته‌بندی لایسنس صرفاً برای **اِسناد و ردیابی منشأ** نگهداری می‌شود. هیچ فیلدی بر مبنای `license_class` از نمایش یا از خروجی API حذف نمی‌شود؛ `raw_publishable` همواره `true` است. هر مقدار همراه با منبع، کلاس لایسنس، زمان دریافت و Tier کیفیت نمایش داده می‌شود.
 
 ---
 
@@ -905,7 +907,7 @@ IndicatorView {
 
 الزام v2: **تمام ۲۲ فاکتور و تمام شاخص‌های زیرین باید در اپ قابل مشاهده باشند.**
 
-### 18.1 ساختار شش‌صفحه‌ای
+### 18.1 ساختار هفت‌صفحه‌ای ‹v2.1›
 
 | # | صفحه | محتوا |
 |---|---|---|
@@ -914,7 +916,8 @@ IndicatorView {
 | 3 | **INDICATORS** | **تمام شاخص‌ها** گروه‌بندی‌شده بر اساس فاکتور — مقدار · Δ · z-score · واحد · منبع · Tier · `event_time` · Latency · Quality · Staleness |
 | 4 | **HORIZONS** | **۶ ردیف** — افق · جهت · احتمال/`UNCALIBRATED` · Coverage · Confidence · Expected Move · P5…P95 |
 | 5 | **EVENTS & NEWS** | تقویم پیش‌رو · Expected/Actual/Surprise · واکنش بازار · Reaction Efficiency · Narrative Divergence |
-| 6 | **DIAGNOSTICS** | سلامت هر منبع · بودجه Rate-Limit مصرف‌شده · کهنگی · `joint_history_floor` · Attribution منابع (WGC/GPR/Cboe/BIS/IMF) |
+| 6 | **DIAGNOSTICS** | سلامت هر منبع · بودجه Rate-Limit مصرف‌شده · کهنگی · `joint_history_floor` · Attribution منابع · **عمق بازار (L2 + Size Tier)** · **منحنی فوروارد COMEX** · **وضعیت تک‌تک شکاف‌های §14 با منبع زنده** |
+| 7 | **LOGS** | صفحهٔ مستقل گزارش‌گیر — §21 |
 
 ### 18.2 فهرست شاخص‌های الزامی صفحه ۳
 
@@ -1052,3 +1055,48 @@ GDELT از IP نوع Datacenter  = BLOCKED (429)
 ---
 
 *پایان سند v2.*
+
+---
+
+## 21. گزارش‌گیر عملیاتی ‹بخش جدید v2.1 — الزام محصول›
+
+### 21.1 الزام
+
+هر شکست در دریافت، پارس، اعتبارسنجی یا محاسبه باید **نام شاخص** و **علت دقیق** را ثبت کند. هیچ شکستی نباید خاموش باشد و هیچ مقداری نباید جایگزین شود.
+
+### 21.2 ساختار رکورد
+
+| فیلد | توضیح |
+|---|---|
+| `sequence` | شمارنده یکنوا |
+| `timestamp` | UTC با دقت میلی‌ثانیه |
+| `level` | `TRACE` · `DEBUG` · `INFO` · `WARN` · `ERROR` |
+| `stage` | `NETWORK` · `PARSE` · `QUALITY` · `FEATURE` · `FACTOR` · `ENGINE` · `RENDER` |
+| `component` | شناسهٔ Provider یا موتور |
+| `code` | کد ماشین‌خوان: `HTTP_403` · `JSON_MALFORMED` · `GATE_G05_NOT_EXPIRED` · `VALUE_ABSENT` · `NO_FREE_SOURCE` · `DEGRADED` · `INGESTED` · `BACKUP_USED` |
+| `message` | شرح انسانی |
+| `key` | **شناسهٔ شاخص یا فاکتوری که رکورد به آن مربوط است** |
+| `url` · `httpStatus` · `latencyMillis` · `detail` | زمینهٔ تشخیصی |
+
+حلقهٔ حافظه با ظرفیت ثابت؛ تعداد رکوردهای حذف‌شده (`dropped`) گزارش می‌شود تا هیچ از دست رفتنی پنهان نماند.
+
+### 21.3 سطح نمایش
+
+صفحهٔ **LOGS** یک تب مستقل است و شامل پنج بخش است: `Summary` · `By Stage` · `Failures` · `Per-Indicator Status` · `Full Trace`.
+
+**قاعدهٔ تفکیک — الزامی:** صفحهٔ LOGS هیچ مقدار بازاری نمایش نمی‌دهد و شش صفحهٔ تحلیلی هیچ خط لاگی نمایش نمی‌دهند. این قاعده با تست خودکار تضمین شده است.
+
+### 21.4 خروجی‌گیری
+
+| مقصد | مکانیزم |
+|---|---|
+| کلیپ‌بورد | `ClipboardManager` — متن کامل |
+| فایل `.md` | `ACTION_CREATE_DOCUMENT` با `type=text/markdown`؛ در نبود Document Provider، نوشتن در `getExternalFilesDir` |
+| فایل `.txt` | همان مسیر با `type=text/plain` |
+| سرور | `GET /v1/logs.md` · `GET /v1/logs.txt` با `Content-Disposition: attachment` · `GET /v1/logs.json?level=&stage=&key=&q=&limit=` |
+
+سرآیند هر خروجی شامل نسخهٔ Spec، مدل دستگاه/منبع، زمان آخرین به‌روزرسانی، فیلتر فعال و شمارش سطوح است.
+
+### 21.5 فیلتر
+
+فیلتر متنی روی `key` / `code` / `component` / `message` و انتخاب حداقل سطح (`ERROR` / `WARN` / `INFO` / `DEBUG`) در اپ و در `/v1/logs.json` یکسان عمل می‌کند.

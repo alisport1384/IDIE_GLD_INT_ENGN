@@ -54,6 +54,14 @@ data class ScreenModel(
         const val SCREEN_EVENTS = "EVENTS"
         const val SCREEN_DIAGNOSTICS = "DIAGNOSTICS"
 
+        /**
+         * SPEC v2.1 §21 — the operational log lives on its own screen.
+         * It is built from [DiagnosticLog] alone and shares no row with the
+         * analytical screens, so log content can never be mistaken for a
+         * market reading.
+         */
+        const val SCREEN_LOGS = "LOGS"
+
         fun error(messageFa: String, messageEn: String, now: Instant = Instant.now()): ScreenModel =
             ScreenModel(
                 generatedAt = now,

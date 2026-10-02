@@ -2,6 +2,8 @@ package io.goldintelligence.ingestion
 
 import io.goldintelligence.engine.CalibrationDefaults
 import io.goldintelligence.engine.DataQuality
+import io.goldintelligence.engine.DiagnosticLog
+import io.goldintelligence.engine.LogStage
 import io.goldintelligence.engine.FactorCatalog
 import io.goldintelligence.engine.FactorScore
 import io.goldintelligence.engine.FeatureKeys
@@ -45,7 +47,7 @@ data class FactorResult(
  * entirely. It is never emitted with score 0, which the weighting layer would
  * otherwise read as "neutral evidence" rather than "no evidence".
  */
-class SpecFactorEngine {
+class SpecFactorEngine(private val log: DiagnosticLog = DiagnosticLog.shared) {
 
     fun score(bundle: FeatureBundle, now: Instant = Instant.now()): FactorResult {
         val scores = mutableListOf<FactorScore>()
@@ -88,6 +90,27 @@ class SpecFactorEngine {
                 minHorizon = minH,
                 reason = reason ?: if (missing.isNotEmpty()) "MISSING_INPUTS: ${missing.joinToString()}" else null
             )
+
+            if (value != null && contributors.isNotEmpty()) {
+                log.debug(
+                    LogStage.FACTOR, "SpecFactorEngine", if (isProxy) "SCORED_PROXY" else "SCORED",
+                    String.format(java.util.Locale.US, "%.2f (q %.2f)", value.coerceIn(-100.0, 100.0), quality),
+                    key = id
+                )
+            } else {
+                log.warn(
+                    LogStage.FACTOR, "SpecFactorEngine",
+                    when {
+                        reason != null -> reason.substringBefore(':')
+                        missing.isNotEmpty() -> "MISSING_INPUTS"
+                        else -> "NOT_COMPUTABLE"
+                    },
+                    reason ?: "dropped: " +
+                        (if (missing.isEmpty()) "formula produced no value" else "missing " + missing.joinToString()),
+                    key = id,
+                    detail = "baseWeight=$baseWeight minHorizon=${minH.code} used=${present.size}"
+                )
+            }
         }
 
         fun f(key: String): Double? = bundle.valueOf(key)
@@ -197,13 +220,15 @@ class SpecFactorEngine {
             listOf(FeatureKeys.COT_NET_POSITION_ZSCORE)
         )
 
-        /* F12 — Physical demand. */
+        /* F12 — Physical demand.
+         * SPEC v2.1: measured from the Shanghai and Mumbai premia. A premium
+         * of roughly one percent over the international price is a strong
+         * physical bid, so the scale is tight. */
         emit(
             "F12_PHYSICAL_DEMAND",
-            Stats.zToScore(f(FeatureKeys.PHYSICAL_DEMAND_INDEX), 2.0),
-            emptyList(),
+            Stats.ratioToScore(f(FeatureKeys.PHYSICAL_DEMAND_INDEX), 1.5),
             listOf(FeatureKeys.PHYSICAL_DEMAND_INDEX),
-            reason = "NO_FREE_SOURCE: SGE and MCX premium pages are unreachable or blocked for programmatic access."
+            listOf(FeatureKeys.PHYSICAL_DEMAND_INDEX)
         )
 
         /* F13 — Momentum. */

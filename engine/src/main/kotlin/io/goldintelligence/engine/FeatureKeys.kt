@@ -103,4 +103,36 @@ object FeatureKeys {
 
     // Macro / growth state
     const val RECESSION_PROBABILITY = "US_Recession_Probability"
+
+    /* ---------------- SPEC v2.1 — keys added when the paid gaps closed ---
+     * Each of these was previously reported as OUT_OF_STACK, UNREACHABLE or
+     * WEEKLY_ONLY and now carries a measured value.
+     */
+
+    // Depth of book — real L2 for allocated gold, no longer a top-of-book proxy.
+    const val BOOK_IMBALANCE = "Book_Imbalance"
+    const val BOOK_DEPTH_TOTAL = "Book_Depth_Total"
+    const val BOOK_SPREAD_BP = "Book_Spread_Bp"
+    const val OTC_SPREAD_BP = "OTC_Spread_Bp"
+
+    // Daily open interest, replacing the weekly-only positioning print.
+    const val OPEN_INTEREST = "Open_Interest"
+    const val OPEN_INTEREST_CHANGE = "OpenInterest_Change"
+    const val OPEN_INTEREST_ZSCORE = "OpenInterest_ZScore"
+
+    // Regional physical premia.
+    const val CHINA_PREMIUM = "China_Premium"
+    const val INDIA_PREMIUM = "India_Premium"
+
+    // Benchmark and cross-source agreement.
+    const val LBMA_BENCHMARK = "LBMA_Benchmark"
+    const val LBMA_DEVIATION = "LBMA_Deviation"
+    const val SPOT_SOURCE_DISPERSION = "Spot_Source_Dispersion"
+
+    // Calendar and consensus.
+    const val CALENDAR_HIGH_IMPACT_24H = "Calendar_HighImpact_24h"
+    const val CALENDAR_HOURS_TO_EVENT = "Calendar_Hours_To_Event"
+    const val CONSENSUS_SURPRISE = "Consensus_Surprise"
+    const val CPI_YOY = "CPI_YoY"
+    const val UNEMPLOYMENT_RATE = "Unemployment_Rate"
 }

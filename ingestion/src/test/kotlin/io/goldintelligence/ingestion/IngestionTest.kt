@@ -1,5 +1,6 @@
 package io.goldintelligence.ingestion
 
+import io.goldintelligence.engine.FactorCatalog
 import io.goldintelligence.engine.StrictDataValidator
 import java.time.Duration
 import java.time.Instant
@@ -147,5 +148,24 @@ class SnapshotAdapterTest {
         )
         val snapshot = adapter.toInputSnapshot(frame)
         assertTrue(snapshot.news.isEmpty())
+    }
+
+    /** A duplicated catalogue key renders the same indicator twice on screen. */
+    @Test
+    fun `indicator catalogue has no duplicate keys`() {
+        val duplicates = IndicatorCatalog.indicators
+            .groupBy { it.key }
+            .filterValues { it.size > 1 }
+            .keys
+        assertTrue("duplicated indicator keys: $duplicates", duplicates.isEmpty())
+        assertEquals(IndicatorCatalog.indicators.size, IndicatorCatalog.byKey.size)
+    }
+
+    /** Every catalogued indicator must name a factor the engine actually scores. */
+    @Test
+    fun `every catalogued indicator belongs to a declared factor`() {
+        val declared = FactorCatalog.factors.map { it.id }.toSet()
+        val unknown = IndicatorCatalog.indicators.map { it.factorId }.filterNot { it in declared }.distinct()
+        assertTrue("indicators attached to unknown factors: $unknown", unknown.isEmpty())
     }
 }

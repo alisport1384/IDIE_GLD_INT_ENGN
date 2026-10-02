@@ -67,6 +67,38 @@ data class MarketUniverse(
         const val GLD_IV30 = "GLD_IV30"
         const val GOLD_FUT_FRONT = "GOLD_FUT_FRONT"
         const val GOLD_FUT_DEFERRED = "GOLD_FUT_DEFERRED"
+
+        // --- SPEC v2.1: ids that close the previously unreachable gaps ----
+        /** Real ICE dollar index, replaces the synthetic currency basket. */
+        const val DXY_INDEX = "DXY_INDEX"
+        /** COMEX gold front-month open interest, published daily. */
+        const val GOLD_OI_DAILY = "GOLD_OI_DAILY"
+        const val GOLD_FUT_VOLUME = "GOLD_FUT_VOLUME"
+        /** Depth-of-book, aggregated over the captured levels. */
+        const val BOOK_IMBALANCE = "BOOK_IMBALANCE"
+        const val BOOK_BID_VOLUME = "BOOK_BID_VOLUME"
+        const val BOOK_ASK_VOLUME = "BOOK_ASK_VOLUME"
+        const val BOOK_SPREAD_BP = "BOOK_SPREAD_BP"
+        const val BOOK_DEPTH_LEVELS = "BOOK_DEPTH_LEVELS"
+        const val OTC_SPREAD_BP = "OTC_SPREAD_BP"
+        /** Regional physical markets. */
+        const val SGE_GOLD_CNY_G = "SGE_GOLD_CNY_G"
+        const val SHFE_GOLD_CNY_G = "SHFE_GOLD_CNY_G"
+        const val MCX_GOLD_INR_10G = "MCX_GOLD_INR_10G"
+        const val CHINA_PREMIUM_PCT = "CHINA_PREMIUM_PCT"
+        const val INDIA_PREMIUM_PCT = "INDIA_PREMIUM_PCT"
+        /** LBMA-based benchmark published by the World Gold Council. */
+        const val LBMA_BENCHMARK = "LBMA_BENCHMARK"
+        /** Cross-source spot dispersion, in basis points. */
+        const val SPOT_CONSENSUS_BP = "SPOT_CONSENSUS_BP"
+        /** Calendar / consensus. */
+        const val CALENDAR_HIGH_IMPACT_24H = "CALENDAR_HIGH_IMPACT_24H"
+        const val CALENDAR_NEXT_EVENT_HOURS = "CALENDAR_NEXT_EVENT_HOURS"
+        const val CPI_YOY = "CPI_YOY"
+        const val UNEMPLOYMENT_RATE = "UNEMPLOYMENT_RATE"
+        const val CONSENSUS_SURPRISE = "CONSENSUS_SURPRISE"
+        /** Spot history sourced from a gold instrument, not an ETF wrapper. */
+        const val GOLD_SPOT_HISTORY = "GOLD_SPOT_HISTORY"
     }
 }
 

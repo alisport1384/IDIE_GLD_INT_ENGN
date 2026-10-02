@@ -29,17 +29,41 @@ European Central Bank — euro foreign exchange reference rates, retrieved via
 gold-api.com — spot gold and silver reference prices. Attribution required.
   https://api.gold-api.com
 
-Yahoo Finance chart API — used only where a licence-restricted source is
-  acceptable for DERIVED values. Raw values from this source are never
-  published by the application.
+Yahoo Finance chart API — optional provider for the dated COMEX futures curve.
+  https://query1.finance.yahoo.com
 
-Licence policy
---------------
+TradingView public scanner — index, futures and open-interest quotes.
+  https://scanner.tradingview.com
 
-A value whose licence class is not PUBLIC_DOMAIN or ATTRIBUTION is never
-rendered raw in the user interface or returned raw by the REST API; only
-derived quantities (z-scores, ranks, signs, factor scores) are exposed.
-This rule is enforced in code, in the data contract, not only in documentation.
+Kraken — PAXG/USD order book, spread and daily candles (1 PAXG = 1 fine ounce).
+  https://api.kraken.com
+
+OKX — XAUT/USDT order book and daily candles.
+  https://www.okx.com
+
+Swissquote — public OTC bid/ask quotes for XAU/USD by size tier.
+  https://forex-data-feed.swissquote.com
+
+World Gold Council — LBMA-based benchmark price series.
+  https://fsapi.gold.org
+
+U.S. Bureau of Labor Statistics — CPI and unemployment series, public API v1.
+  https://api.bls.gov
+
+ForexFactory / FairEconomy — economic calendar with consensus forecasts.
+  https://nfs.faireconomy.media
+
+Shanghai Gold Exchange Au(T+D) quote, via Sina and Eastmoney public endpoints.
+  https://hq.sinajs.cn / https://push2.eastmoney.com
+
+Source policy
+-------------
+
+Every source in the stack is reachable without an API key, an account, or a
+paid subscription. Each published value carries its source, licence class,
+retrieval timestamp and quality tier in the data contract, and that provenance
+is rendered next to the value. Attribution is given above; no additional
+publication restriction is applied to any value.
 
 Disclaimer
 ----------

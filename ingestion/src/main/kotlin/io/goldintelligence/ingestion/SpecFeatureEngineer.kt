@@ -1,8 +1,10 @@
 package io.goldintelligence.ingestion
 
 import io.goldintelligence.engine.CalibrationDefaults
+import io.goldintelligence.engine.DiagnosticLog
 import io.goldintelligence.engine.FeatureKeys
 import io.goldintelligence.engine.FeatureSet
+import io.goldintelligence.engine.LogStage
 import io.goldintelligence.engine.Tier
 import java.time.Duration
 import java.time.Instant
@@ -20,7 +22,7 @@ import kotlin.math.ln
  * capped at QUALITY_PROXY_CEILING, which propagates into the factor weight
  * and into Confidence.
  */
-class SpecFeatureEngineer {
+class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared) {
 
     fun build(u: MarketUniverse): FeatureBundle {
         val out = LinkedHashMap<String, FeatureValue>()
@@ -36,7 +38,17 @@ class SpecFeatureEngineer {
             tierOverride: Tier? = null,
             qualityOverride: Double? = null
         ) {
-            if (value == null || value.isNaN() || value.isInfinite()) return
+            if (value == null || value.isNaN() || value.isInfinite()) {
+                log.warn(
+                    LogStage.FEATURE, "SpecFeatureEngineer",
+                    if (value == null) "INPUT_MISSING" else "NOT_FINITE",
+                    if (value == null) "required input absent from the universe (source $sourceId)"
+                    else "computed value was $value",
+                    key = key,
+                    detail = "source=$sourceId unit=$unit"
+                )
+                return
+            }
             val p = u.point(sourceId)
             val tier = tierOverride ?: p?.tier ?: Tier.C
             val asOf = p?.observationTimestamp ?: now
@@ -53,6 +65,12 @@ class SpecFeatureEngineer {
                 asOf = asOf,
                 note = note
             )
+            log.debug(
+                LogStage.FEATURE, "SpecFeatureEngineer",
+                if (isProxy) "OK_PROXY" else "OK",
+                String.format(java.util.Locale.US, "%.6g", value) + " " + unit,
+                key = key
+            )
         }
 
         /* ---- F01 Real yield -------------------------------------- */
@@ -63,11 +81,17 @@ class SpecFeatureEngineer {
         put(FeatureKeys.REAL_YIELD_TREND, real10?.slope(20), "slope/level", MarketUniverse.REAL10Y)
 
         /* ---- F02 Dollar ------------------------------------------- */
+        // SPEC v2.1: the real index is now quoted, so the currency-basket
+        // replication is only the fallback. The history still comes from the
+        // ECB series — the index level is anchored to the live quote.
+        val dxyReal = u.scalar(MarketUniverse.DXY_INDEX)
         val dxy = u.seriesOf(MarketUniverse.DXY_SYNTHETIC)
-        val dxyProxy = u.point(MarketUniverse.DXY_SYNTHETIC)?.isProxy ?: true
-        put(FeatureKeys.DXY, dxy?.last?.close ?: u.scalar(MarketUniverse.DXY_SYNTHETIC),
-            "index", MarketUniverse.DXY_SYNTHETIC, isProxy = dxyProxy,
-            note = "Trade-weighted replication from ECB reference rates; ICE DXY is not freely licensed.")
+        val dxyProxy = dxyReal == null && (u.point(MarketUniverse.DXY_SYNTHETIC)?.isProxy ?: true)
+        val dxySource = if (dxyReal != null) MarketUniverse.DXY_INDEX else MarketUniverse.DXY_SYNTHETIC
+        put(FeatureKeys.DXY, dxyReal ?: dxy?.last?.close ?: u.scalar(MarketUniverse.DXY_SYNTHETIC),
+            "index", dxySource, isProxy = dxyProxy,
+            note = if (dxyReal != null) "ICE U.S. Dollar Index, quoted."
+            else "Trade-weighted replication from ECB reference rates.")
         put(FeatureKeys.DXY_ZSCORE, dxy?.zScore(252), "z", MarketUniverse.DXY_SYNTHETIC, isProxy = dxyProxy)
         put(FeatureKeys.DXY_TREND, dxy?.slope(20), "slope/level", MarketUniverse.DXY_SYNTHETIC, isProxy = dxyProxy)
         put(FeatureKeys.DXY_MOVE_SIGMA, dxy?.moveSigma(252), "sigma", MarketUniverse.DXY_SYNTHETIC, isProxy = dxyProxy)
@@ -114,7 +138,11 @@ class SpecFeatureEngineer {
             val sd = Stats.stdev(diffs)
             if (beChange != null && sd != null && sd > 0.0) beChange / (sd * 4.47) else null
         }
-        put(FeatureKeys.INFLATION_SURPRISE, beZ, "z", MarketUniverse.BREAKEVEN10Y, isProxy = true,
+        val measuredSurprise = u.scalar(MarketUniverse.CONSENSUS_SURPRISE)
+        put(FeatureKeys.INFLATION_SURPRISE, measuredSurprise ?: beZ,
+            if (measuredSurprise != null) "normalized (actual vs consensus)" else "z",
+            if (measuredSurprise != null) MarketUniverse.CONSENSUS_SURPRISE else MarketUniverse.BREAKEVEN10Y,
+            isProxy = measuredSurprise == null,
             note = "Market-implied inflation revision; consensus-vs-actual CPI surprise needs a paid consensus feed.")
 
         /* ---- F06 Economic surprise --------------------------------- */
@@ -213,8 +241,15 @@ class SpecFeatureEngineer {
             goldSourceId, isProxy = goldIsProxy)
         put(FeatureKeys.GOLD_MOVE_SIGMA, goldPx?.moveSigma(252), "sigma", goldSourceId, isProxy = goldIsProxy)
 
-        /* ---- F14 Microstructure ------------------------------------ */
+        /* ---- F14 Microstructure ------------------------------------
+         * SPEC v2.1: aggregated depth of book for allocated gold, captured
+         * from the Kraken PAXG/USD and OKX XAUT/USDT limit books (one token
+         * is one fine troy ounce). This is measured depth, not a proxy, so
+         * the proxy ceiling no longer applies. Top-of-book ETF sizes and the
+         * intrabar close position remain as ordered fallbacks.
+         */
         val lastBar = goldPx?.last
+        val bookImbalance = u.scalar(MarketUniverse.BOOK_IMBALANCE)
         val bidSize = u.scalar(MarketUniverse.GLD_BID_SIZE)
         val askSize = u.scalar(MarketUniverse.GLD_ASK_SIZE)
         val topOfBook = if (bidSize != null && askSize != null && (bidSize + askSize) > 0.0) {
@@ -224,17 +259,42 @@ class SpecFeatureEngineer {
             val range = b.high - b.low
             if (range > 0.0) ((b.close - b.low) / range - 0.5) * 2.0 else null
         }
+        val levels = u.scalar(MarketUniverse.BOOK_DEPTH_LEVELS)?.toInt()
         put(
             FeatureKeys.MICROSTRUCTURE_IMBALANCE,
-            topOfBook ?: intrabar,
-            if (topOfBook != null) "-1..1 (top-of-book)" else "-1..1 (bar position)",
-            if (topOfBook != null) MarketUniverse.GLD_BID_SIZE else goldSourceId,
-            isProxy = true,
-            note = if (topOfBook != null)
-                "Displayed bid/ask size imbalance. Full depth-of-book requires a paid L2 feed (CME/Databento)."
-            else
-                "Intrabar close position; top-of-book sizes were unavailable this cycle."
+            bookImbalance ?: topOfBook ?: intrabar,
+            when {
+                bookImbalance != null -> "-1..1 (L2 depth)"
+                topOfBook != null -> "-1..1 (top-of-book)"
+                else -> "-1..1 (bar position)"
+            },
+            when {
+                bookImbalance != null -> MarketUniverse.BOOK_IMBALANCE
+                topOfBook != null -> MarketUniverse.GLD_BID_SIZE
+                else -> goldSourceId
+            },
+            isProxy = bookImbalance == null,
+            note = when {
+                bookImbalance != null ->
+                    "Full limit-order-book imbalance over ${levels ?: 0} captured levels " +
+                        "(Kraken PAXG/USD and OKX XAUT/USDT, allocated gold)."
+                topOfBook != null -> "Displayed ETF bid/ask size imbalance; venue books were unavailable."
+                else -> "Intrabar close position; no book was available this cycle."
+            }
         )
+        put(FeatureKeys.BOOK_IMBALANCE, bookImbalance, "-1..1", MarketUniverse.BOOK_IMBALANCE,
+            note = "Signed depth imbalance across every captured price level.")
+        val bidVol = u.scalar(MarketUniverse.BOOK_BID_VOLUME)
+        val askVol = u.scalar(MarketUniverse.BOOK_ASK_VOLUME)
+        put(FeatureKeys.BOOK_DEPTH_TOTAL,
+            if (bidVol != null && askVol != null) bidVol + askVol else null,
+            "oz resting", MarketUniverse.BOOK_BID_VOLUME,
+            note = "Total resting size on both sides of the captured books.")
+        put(FeatureKeys.BOOK_SPREAD_BP, u.scalar(MarketUniverse.BOOK_SPREAD_BP), "bp",
+            MarketUniverse.BOOK_SPREAD_BP, note = "Tightest top-of-book spread across the gold venues.")
+        put(FeatureKeys.OTC_SPREAD_BP, u.scalar(MarketUniverse.OTC_SPREAD_BP), "bp",
+            MarketUniverse.OTC_SPREAD_BP,
+            note = "Swissquote OTC best bid/offer, tightest size tier.")
 
         /* ---- F15 Options / volatility ------------------------------ */
         val iv30 = u.scalar(MarketUniverse.GLD_IV30)
@@ -293,12 +353,34 @@ class SpecFeatureEngineer {
         /* ---- F19 / F20 China & India -------------------------------- */
         val cny = u.seriesOf(MarketUniverse.FX_CNY)
         val inr = u.seriesOf(MarketUniverse.FX_INR)
-        put(FeatureKeys.CHINA_DEMAND_INDEX, cny?.returnOver(20)?.times(-100.0), "% (CNY strength, 20d)",
-            MarketUniverse.FX_CNY, isProxy = true,
-            note = "Shanghai physical premium has no verified free endpoint; CNY strength is the admissible substitute.")
-        put(FeatureKeys.INDIA_DEMAND_INDEX, inr?.returnOver(20)?.times(-100.0), "% (INR strength, 20d)",
-            MarketUniverse.FX_INR, isProxy = true,
-            note = "MCX/IBJA premium is not machine-readable without a licence.")
+        // SPEC v2.1: the physical premium is now measured directly.
+        // A positive premium means the regional market is bidding gold above
+        // the international price — the demand signal the factor wants.
+        val chinaPremium = u.scalar(MarketUniverse.CHINA_PREMIUM_PCT)
+        val indiaPremium = u.scalar(MarketUniverse.INDIA_PREMIUM_PCT)
+        put(FeatureKeys.CHINA_PREMIUM, chinaPremium, "% vs international",
+            MarketUniverse.CHINA_PREMIUM_PCT,
+            note = "Shanghai Gold Exchange Au(T+D) converted at the ECB CNY reference rate.")
+        put(FeatureKeys.INDIA_PREMIUM, indiaPremium, "% vs international",
+            MarketUniverse.INDIA_PREMIUM_PCT,
+            note = "MCX front-month gold converted at the ECB INR reference rate; " +
+                "includes Indian import duty and GST, so the level is structurally positive.")
+        put(FeatureKeys.CHINA_DEMAND_INDEX,
+            chinaPremium ?: cny?.returnOver(20)?.times(-100.0),
+            if (chinaPremium != null) "% (Shanghai premium)" else "% (CNY strength, 20d)",
+            if (chinaPremium != null) MarketUniverse.CHINA_PREMIUM_PCT else MarketUniverse.FX_CNY,
+            isProxy = chinaPremium == null,
+            note = if (chinaPremium != null) "Measured Shanghai premium over the international price."
+            else "Shanghai quote unavailable this cycle; CNY strength is the fallback.")
+        put(FeatureKeys.INDIA_DEMAND_INDEX,
+            indiaPremium?.let { it - INDIA_STRUCTURAL_WEDGE_PCT } ?: inr?.returnOver(20)?.times(-100.0),
+            if (indiaPremium != null) "% (MCX premium, duty-adjusted)" else "% (INR strength, 20d)",
+            if (indiaPremium != null) MarketUniverse.INDIA_PREMIUM_PCT else MarketUniverse.FX_INR,
+            isProxy = indiaPremium == null,
+            note = if (indiaPremium != null)
+                "MCX premium less the $INDIA_STRUCTURAL_WEDGE_PCT% statutory duty and tax wedge, " +
+                    "so only the discretionary part drives the factor."
+            else "MCX quote unavailable this cycle; INR strength is the fallback.")
 
         /* ---- F21 Oil ------------------------------------------------ */
         val uso = u.seriesOf(MarketUniverse.OIL_ETF)
@@ -312,6 +394,68 @@ class SpecFeatureEngineer {
             if (dxyTrend != null && us2Trend != null) (us2Trend - dxyTrend) * 100.0 else null,
             "divergence index", MarketUniverse.US02Y, isProxy = true,
             note = "US front-end trend relative to the trade-weighted dollar trend.")
+
+        /* ---- F12 Physical demand (SPEC v2.1) -------------------------
+         * Previously NO_FREE_SOURCE. The two largest physical markets now
+         * quote: the premium a regional market pays over the international
+         * price is the cleanest observable read on physical demand. India's
+         * statutory wedge is removed first so the two are comparable.
+         */
+        val physicalParts = listOfNotNull(
+            chinaPremium,
+            indiaPremium?.let { it - INDIA_STRUCTURAL_WEDGE_PCT }
+        )
+        put(FeatureKeys.PHYSICAL_DEMAND_INDEX,
+            if (physicalParts.isEmpty()) null else physicalParts.average(),
+            "% (regional premium)",
+            if (chinaPremium != null) MarketUniverse.CHINA_PREMIUM_PCT else MarketUniverse.INDIA_PREMIUM_PCT,
+            note = "Mean premium paid in Shanghai and Mumbai over the international price, " +
+                "net of Indian duty. Positive means the physical market is bidding above the paper price.")
+
+        /* ---- SPEC v2.1 · daily open interest ------------------------- */
+        val oiDaily = u.scalar(MarketUniverse.GOLD_OI_DAILY)
+        val cotOi = u.seriesOf(MarketUniverse.COT_NET_NONCOMM)
+        put(FeatureKeys.OPEN_INTEREST, oiDaily, "contracts", MarketUniverse.GOLD_OI_DAILY,
+            note = "COMEX front-month open interest, published daily.")
+        if (oiDaily != null && cotOi != null) {
+            val weekly = cotOi.bars.mapNotNull { it.volume }.takeLast(156)
+            if (weekly.size >= 30) {
+                put(FeatureKeys.OPEN_INTEREST_ZSCORE, Stats.zScore(oiDaily, weekly + oiDaily), "z",
+                    MarketUniverse.GOLD_OI_DAILY,
+                    note = "Daily print standardized against three years of CFTC weekly open interest.")
+                put(FeatureKeys.OPEN_INTEREST_CHANGE,
+                    weekly.lastOrNull()?.let { if (it > 0) (oiDaily / it - 1.0) * 100.0 else null },
+                    "% vs last CFTC report", MarketUniverse.GOLD_OI_DAILY)
+            }
+        }
+
+        /* ---- SPEC v2.1 · benchmark and source agreement -------------- */
+        val benchmark = u.seriesOf(MarketUniverse.LBMA_BENCHMARK)?.last?.close
+        put(FeatureKeys.LBMA_BENCHMARK, benchmark, "USD/oz", MarketUniverse.LBMA_BENCHMARK,
+            note = "LBMA-based benchmark published by the World Gold Council.")
+        put(FeatureKeys.LBMA_DEVIATION,
+            if (benchmark != null && goldSpot != null && benchmark > 0.0)
+                (goldSpot / benchmark - 1.0) * 100.0 else null,
+            "% (spot vs benchmark)", MarketUniverse.LBMA_BENCHMARK,
+            note = "Spot against the most recent published benchmark fixing.")
+        put(FeatureKeys.SPOT_SOURCE_DISPERSION, u.scalar(MarketUniverse.SPOT_CONSENSUS_BP), "bp",
+            MarketUniverse.SPOT_CONSENSUS_BP,
+            note = "Range across the independent spot feeds. A wide range means the feeds disagree.")
+
+        /* ---- SPEC v2.1 · calendar and consensus ---------------------- */
+        put(FeatureKeys.CALENDAR_HIGH_IMPACT_24H, u.scalar(MarketUniverse.CALENDAR_HIGH_IMPACT_24H),
+            "events", MarketUniverse.CALENDAR_HIGH_IMPACT_24H,
+            note = "High-impact scheduled releases inside the next 24 hours.")
+        put(FeatureKeys.CALENDAR_HOURS_TO_EVENT, u.scalar(MarketUniverse.CALENDAR_NEXT_EVENT_HOURS),
+            "h", MarketUniverse.CALENDAR_NEXT_EVENT_HOURS,
+            note = "Hours until the next high-impact release.")
+        put(FeatureKeys.CPI_YOY, u.scalar(MarketUniverse.CPI_YOY), "% y/y", MarketUniverse.CPI_YOY,
+            note = "Headline CPI for all urban consumers, published by the BLS.")
+        put(FeatureKeys.UNEMPLOYMENT_RATE, u.scalar(MarketUniverse.UNEMPLOYMENT_RATE), "%",
+            MarketUniverse.UNEMPLOYMENT_RATE, note = "Civilian unemployment rate, published by the BLS.")
+        val surprise = u.scalar(MarketUniverse.CONSENSUS_SURPRISE)
+        put(FeatureKeys.CONSENSUS_SURPRISE, surprise, "normalized", MarketUniverse.CONSENSUS_SURPRISE,
+            note = "Published actual against the surveyed consensus for the same release.")
 
         /* ---- Macro state --------------------------------------------- */
         // Estrella-Mishkin style term-spread mapping; declared as derived, not observed.
@@ -328,6 +472,13 @@ class SpecFeatureEngineer {
     fun toFeatureSet(bundle: FeatureBundle): FeatureSet = FeatureSet(bundle.numeric())
 
     companion object {
+        /**
+         * Indian import duty plus GST, the statutory part of the MCX premium.
+         * Subtracting it leaves the discretionary demand component, which is
+         * what the factor is supposed to read.
+         */
+        const val INDIA_STRUCTURAL_WEDGE_PCT = 9.0
+
         fun staleness(asOf: Instant, now: Instant): Duration = Duration.between(asOf, now)
         fun absMax(vararg xs: Double?): Double? = xs.filterNotNull().maxByOrNull { abs(it) }
     }

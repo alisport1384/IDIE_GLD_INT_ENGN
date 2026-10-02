@@ -1,5 +1,8 @@
 package io.goldintelligence.client
 
+import io.goldintelligence.engine.DiagnosticLog
+import io.goldintelligence.engine.LogLevel
+import io.goldintelligence.engine.LogStage
 import io.goldintelligence.ingestion.ProviderHealth
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -35,7 +38,8 @@ class HttpClient(
     private val readTimeoutMillis: Int = 25_000,
     private val minIntervalMillis: Long = 250,
     private val maxRetries: Int = 2,
-    private val circuitOpenDuration: Duration = Duration.ofMinutes(15)
+    private val circuitOpenDuration: Duration = Duration.ofMinutes(15),
+    private val log: DiagnosticLog = DiagnosticLog.shared
 ) {
     private val lastCall = ConcurrentHashMap<String, Long>()
     private val circuitUntil = ConcurrentHashMap<String, Instant>()
@@ -52,18 +56,28 @@ class HttpClient(
         return true
     }
 
-    fun get(providerId: String, url: String, accept: String = "*/*"): HttpResponse {
+    fun get(
+        providerId: String,
+        url: String,
+        accept: String = "*/*",
+        headers: Map<String, String> = emptyMap()
+    ): HttpResponse {
         val now = Instant.now()
         if (isOpen(providerId, now)) {
             val r = HttpResponse(url, 0, "", 0, "CIRCUIT_OPEN")
             record(providerId, r, now)
+            log.warn(
+                LogStage.NETWORK, providerId, "CIRCUIT_OPEN",
+                "call skipped, breaker open until " + circuitUntil[providerId],
+                key = null, detail = url
+            )
             return r
         }
         throttle(hostOf(url))
 
         var last: HttpResponse? = null
         for (attempt in 0..maxRetries) {
-            val r = execute(url, accept)
+            val r = execute(url, accept, headers = headers)
             last = r
             if (r.ok) {
                 record(providerId, r, Instant.now())
@@ -72,6 +86,12 @@ class HttpClient(
             // 429/403 are provider-side refusals: open the breaker, do not retry harder.
             if (r.status == 429 || r.status == 403) {
                 circuitUntil[providerId] = Instant.now().plus(circuitOpenDuration)
+                log.error(
+                    LogStage.NETWORK, providerId, "HTTP_" + r.status,
+                    "provider refused the request; breaker opened for " +
+                        circuitOpenDuration.toMinutes() + " min",
+                    detail = url
+                )
                 break
             }
             if (attempt < maxRetries) {
@@ -85,26 +105,99 @@ class HttpClient(
         }
         val result = last ?: HttpResponse(url, 0, "", 0, "NO_RESPONSE")
         record(providerId, result, Instant.now())
+        logResponse(providerId, result)
         return result
     }
 
-    fun getJson(providerId: String, url: String): Json? {
-        val r = get(providerId, url, "application/json")
-        if (!r.ok) return null
-        return Json.parseOrNull(r.body)
+    /**
+     * POST with a request body. Several of the free venues that replaced the
+     * paid gaps (the TradingView screener in particular) only answer to POST.
+     */
+    fun post(
+        providerId: String,
+        url: String,
+        body: String,
+        contentType: String = "application/json",
+        accept: String = "application/json"
+    ): HttpResponse {
+        val now = Instant.now()
+        if (isOpen(providerId, now)) {
+            val r = HttpResponse(url, 0, "", 0, "CIRCUIT_OPEN")
+            record(providerId, r, now)
+            log.warn(LogStage.NETWORK, providerId, "CIRCUIT_OPEN", "POST skipped, breaker open", detail = url)
+            return r
+        }
+        throttle(hostOf(url))
+        val r = execute(url, accept, method = "POST", body = body, contentType = contentType)
+        record(providerId, r, Instant.now())
+        logResponse(providerId, r)
+        if (r.status == 429 || r.status == 403) {
+            circuitUntil[providerId] = Instant.now().plus(circuitOpenDuration)
+        }
+        return r
     }
 
-    fun getText(providerId: String, url: String): String? {
-        val r = get(providerId, url, "text/csv,text/plain,*/*")
+    fun postJson(providerId: String, url: String, body: String): Json? {
+        val r = post(providerId, url, body)
+        if (!r.ok) return null
+        val parsed = Json.parseOrNull(r.body)
+        if (parsed == null) {
+            log.error(
+                LogStage.PARSE, providerId, "JSON_MALFORMED",
+                "response was not valid JSON", detail = r.body.take(200)
+            )
+        }
+        return parsed
+    }
+
+    private fun logResponse(providerId: String, r: HttpResponse) {
+        log.log(
+            level = if (r.ok) LogLevel.DEBUG else LogLevel.ERROR,
+            stage = LogStage.NETWORK,
+            component = providerId,
+            code = when {
+                r.ok -> "HTTP_OK"
+                r.error != null && r.status == 0 -> "TRANSPORT_ERROR"
+                else -> "HTTP_" + r.status
+            },
+            message = if (r.ok) "${r.body.length} chars" else (r.error ?: "HTTP ${r.status}"),
+            url = r.url,
+            httpStatus = r.status.takeIf { it > 0 },
+            latencyMillis = r.latencyMillis
+        )
+    }
+
+    fun getJson(providerId: String, url: String, headers: Map<String, String> = emptyMap()): Json? {
+        val r = get(providerId, url, "application/json", headers)
+        if (!r.ok) return null
+        val parsed = Json.parseOrNull(r.body)
+        if (parsed == null) {
+            log.error(
+                LogStage.PARSE, providerId, "JSON_MALFORMED",
+                "response was not valid JSON", detail = r.body.take(200)
+            )
+        }
+        return parsed
+    }
+
+    fun getText(providerId: String, url: String, headers: Map<String, String> = emptyMap()): String? {
+        val r = get(providerId, url, "text/csv,text/plain,*/*", headers)
         return if (r.ok) r.body else null
     }
 
-    private fun execute(url: String, accept: String): HttpResponse {
+    private fun execute(
+        url: String,
+        accept: String,
+        method: String = "GET",
+        body: String? = null,
+        contentType: String? = null,
+        headers: Map<String, String> = emptyMap()
+    ): HttpResponse {
         val started = System.currentTimeMillis()
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
+                requestMethod = method
                 connectTimeout = connectTimeoutMillis
                 readTimeout = readTimeoutMillis
                 instanceFollowRedirects = true
@@ -112,6 +205,14 @@ class HttpClient(
                 setRequestProperty("Accept", accept)
                 setRequestProperty("Accept-Encoding", "gzip")
                 setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+                // Two of the free feeds answer only when the request carries the
+                // Referer their own page would send; without it they return 403.
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
+                if (body != null) {
+                    doOutput = true
+                    setRequestProperty("Content-Type", contentType ?: "application/json")
+                    outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                }
             }
             val status = conn.responseCode
             val stream = if (status in 200..299) conn.inputStream else conn.errorStream

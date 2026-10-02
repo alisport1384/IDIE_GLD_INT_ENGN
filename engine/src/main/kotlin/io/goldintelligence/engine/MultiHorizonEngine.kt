@@ -278,6 +278,6 @@ class MultiHorizonEngine(
     private fun logistic(bias: Double): Double = 1.0 / (1.0 + exp(-bias / 25.0))
 
     companion object {
-        const val SPEC_VERSION = "SPEC_GOLD_INTELLIGENCE_V2"
+        const val SPEC_VERSION = "SPEC_GOLD_INTELLIGENCE_V2.1"
     }
 }

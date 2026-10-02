@@ -1,6 +1,10 @@
 package io.goldintelligence.app
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,9 +18,11 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import io.goldintelligence.client.Badge
 import io.goldintelligence.client.BadgeKind
 import io.goldintelligence.client.ClientMode
@@ -24,17 +30,22 @@ import io.goldintelligence.client.GoldIntelligenceClient
 import io.goldintelligence.client.Row
 import io.goldintelligence.client.Screen
 import io.goldintelligence.client.ScreenModel
+import io.goldintelligence.engine.DiagnosticLog
+import io.goldintelligence.engine.LogLevel
+import io.goldintelligence.engine.MultiHorizonEngine
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.Executors
 
 /**
- * SPEC v2 §18 — the six normative screens.
+ * SPEC v2.1 §18 — the seven normative screens.
  *
  * The activity is a renderer only: every display decision (proxy badges,
  * gating, staleness, probability suppression at 5m/15m, licence masking) is
  * taken in the client's ScreenModelBuilder, so the phone and the server can
- * never present the same state differently.
+ * never present the same state differently. The logger (§21) is the one
+ * exception: it is rendered straight from DiagnosticLog so that it still
+ * works when the pipeline itself has failed.
  */
 class MainActivity : Activity() {
 
@@ -55,6 +66,11 @@ class MainActivity : Activity() {
     private var persian: Boolean = true
     private var loading: Boolean = false
     private var lastError: String? = null
+
+    /** SPEC v2.1 §21 — logger view state, kept apart from the screen model. */
+    private var logFilter: String = ""
+    private var logMinLevel: LogLevel = LogLevel.DEBUG
+    private var pendingExport: Pair<String, String>? = null
 
     private val autoRefresh = object : Runnable {
         override fun run() {
@@ -167,8 +183,8 @@ class MainActivity : Activity() {
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
         setPadding(dp(14), dp(6), dp(14), dp(10))
         setBackgroundColor(PANEL)
-        text = "Sources: Treasury · CFTC · NY Fed · Cboe (delayed) · ECB/Frankfurter · gold-api · Yahoo (derived only). " +
-            "Not investment advice."
+        text = "Sources: Treasury · CFTC · NY Fed · Cboe · ECB/Frankfurter · gold-api · TradingView scanner · " +
+            "Kraken · OKX · Swissquote · WGC/LBMA · BLS · ForexFactory · SGE. Not investment advice."
     }
 
     private fun smallButton(label: String, onClick: () -> Unit): Button = Button(this).apply {
@@ -214,6 +230,13 @@ class MainActivity : Activity() {
         content.removeAllViews()
         updateStatus()
 
+        // The logger is available even before the first successful refresh —
+        // that is precisely when it is needed.
+        if (selected == ScreenModel.SCREEN_LOGS) {
+            renderLogger()
+            return
+        }
+
         val m = model
         if (m == null) {
             content.addView(note(if (persian) "در حال دریافت داده‌های واقعی…" else "Fetching live data…"))
@@ -237,7 +260,8 @@ class MainActivity : Activity() {
                 ScreenModel.SCREEN_INDICATORS to (if (persian) "شاخص‌ها" else "Indicators"),
                 ScreenModel.SCREEN_HORIZONS to (if (persian) "افق‌ها" else "Horizons"),
                 ScreenModel.SCREEN_EVENTS to (if (persian) "رویدادها" else "Events"),
-                ScreenModel.SCREEN_DIAGNOSTICS to (if (persian) "تشخیص" else "Diagnostics")
+                ScreenModel.SCREEN_DIAGNOSTICS to (if (persian) "تشخیص" else "Diagnostics"),
+                ScreenModel.SCREEN_LOGS to (if (persian) "گزارش‌گیر" else "Logger")
             )
         for ((id, label) in ids) {
             val active = id == selected
@@ -256,6 +280,299 @@ class MainActivity : Activity() {
             }
             tabBar.addView(b)
         }
+    }
+
+    /* ------------------------- logger (SPEC v2.1 §21) -------------------------
+     * A separate surface with its own controls. It never renders a market
+     * value and no analytical screen renders a log line.
+     */
+
+    private fun renderLogger() {
+        val log = DiagnosticLog.shared
+        val counts = log.countsByLevel()
+        val errors = counts[LogLevel.ERROR] ?: 0
+        val warns = counts[LogLevel.WARN] ?: 0
+
+        content.addView(sectionHeader(if (persian) "کنترل گزارش‌گیر" else "Logger controls"))
+        content.addView(loggerControls())
+
+        content.addView(
+            sectionHeader(
+                (if (persian) "خلاصه" else "Summary") +
+                    "   ·   ${log.snapshot().size} " + (if (persian) "رکورد" else "records")
+            )
+        )
+        val summary = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) }
+        }
+        summary.addView(
+            renderRow(
+                Row(
+                    "خطا", "Errors", "$errors",
+                    listOf(Badge(if (errors == 0) "CLEAN" else "ATTENTION",
+                        if (errors == 0) BadgeKind.OK else BadgeKind.ERROR)),
+                    emphasis = errors > 0
+                )
+            )
+        )
+        summary.addView(divider())
+        summary.addView(
+            renderRow(
+                Row(
+                    "هشدار", "Warnings", "$warns",
+                    listOf(Badge(if (warns == 0) "CLEAN" else "REVIEW",
+                        if (warns == 0) BadgeKind.OK else BadgeKind.WARN))
+                )
+            )
+        )
+        log.countsByStage().forEach { (stage, n) ->
+            summary.addView(divider())
+            summary.addView(renderRow(Row(stage.name, stage.name, "$n")))
+        }
+        content.addView(summary)
+
+        // Per-indicator roll-up: one line per indicator, worst state wins.
+        val statuses = log.indicatorStatuses()
+            .filter { logFilter.isBlank() || it.key.contains(logFilter, true) ||
+                it.code.contains(logFilter, true) || it.message.contains(logFilter, true) }
+        content.addView(
+            sectionHeader(
+                (if (persian) "وضعیت هر شاخص" else "Per-indicator status") + "   ·   ${statuses.size}"
+            )
+        )
+        val statusCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) }
+        }
+        if (statuses.isEmpty()) {
+            statusCard.addView(note(if (persian) "رکوردی مطابق فیلتر نیست" else "No record matches the filter"))
+        } else {
+            statuses.forEachIndexed { i, st ->
+                if (i > 0) statusCard.addView(divider())
+                statusCard.addView(
+                    renderRow(
+                        Row(
+                            st.key, st.key,
+                            if (st.ok) "OK" else st.code,
+                            listOf(
+                                Badge(
+                                    st.level.name,
+                                    when (st.level) {
+                                        LogLevel.ERROR -> BadgeKind.ERROR
+                                        LogLevel.WARN -> BadgeKind.WARN
+                                        else -> BadgeKind.OK
+                                    }
+                                ),
+                                Badge(st.component, BadgeKind.INFO)
+                            ),
+                            noteFa = st.message, noteEn = st.message,
+                            emphasis = !st.ok
+                        )
+                    )
+                )
+            }
+        }
+        content.addView(statusCard)
+
+        val entries = log.filter(logMinLevel, null, null, logFilter).takeLast(500).reversed()
+        content.addView(
+            sectionHeader((if (persian) "ردیابی" else "Trace") + "   ·   ${entries.size}")
+        )
+        val traceCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) }
+        }
+        if (entries.isEmpty()) {
+            traceCard.addView(note(if (persian) "رکوردی مطابق فیلتر نیست" else "No record matches the filter"))
+        } else {
+            entries.forEach { e ->
+                traceCard.addView(TextView(this).apply {
+                    text = e.oneLine()
+                    setTextColor(
+                        when (e.level) {
+                            LogLevel.ERROR -> RED
+                            LogLevel.WARN -> AMBER
+                            LogLevel.INFO -> TEXT
+                            else -> MUTED
+                        }
+                    )
+                    setTypeface(Typeface.MONOSPACE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                    setPadding(0, dp(2), 0, dp(2))
+                    setHorizontallyScrolling(false)
+                })
+            }
+        }
+        val traceScroll = HorizontalScrollView(this).apply {
+            addView(traceCard)
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+        }
+        content.addView(traceScroll)
+    }
+
+    private fun loggerControls(): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) }
+        }
+
+        val search = EditText(this).apply {
+            hint = if (persian) "جستجو در شاخص، کد یا پیام" else "Filter by indicator, code or message"
+            setText(logFilter)
+            setTextColor(TEXT)
+            setHintTextColor(MUTED)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            background = pill(PANEL_HI, ACCENT_DIM)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setSingleLine(true)
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+        }
+        search.setOnEditorActionListener { _, _, _ ->
+            logFilter = search.text.toString().trim()
+            render()
+            true
+        }
+        box.addView(search)
+
+        val levels = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        listOf(LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO, LogLevel.DEBUG).forEach { lvl ->
+            val active = logMinLevel == lvl
+            levels.addView(Button(this).apply {
+                text = lvl.name
+                isAllCaps = false
+                setTextColor(if (active) BG else ACCENT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                background = pill(if (active) ACCENT else PANEL_HI, ACCENT_DIM)
+                setPadding(dp(8), dp(2), dp(8), dp(2))
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(4) }
+                setOnClickListener {
+                    logMinLevel = lvl
+                    render()
+                }
+            })
+        }
+        box.addView(levels)
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(10), 0, 0)
+        }
+        fun action(label: String, weight: Float, onClick: () -> Unit) = Button(this).apply {
+            text = label
+            isAllCaps = false
+            setTextColor(ACCENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            background = pill(PANEL_HI, ACCENT_DIM)
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, weight).apply { rightMargin = dp(4) }
+            setOnClickListener { onClick() }
+        }
+        actions.addView(action(if (persian) "کپی" else "Copy", 1f) { copyLog() })
+        actions.addView(action(".md", 1f) { exportLog(true) })
+        actions.addView(action(".txt", 1f) { exportLog(false) })
+        actions.addView(action(if (persian) "پاک‌کردن" else "Clear", 1f) {
+            DiagnosticLog.shared.clear()
+            toast(if (persian) "گزارش پاک شد" else "Log cleared")
+            render()
+        })
+        box.addView(actions)
+        return box
+    }
+
+    private fun logHeader(): Map<String, String> = linkedMapOf(
+        "app" to "Gold Intelligence",
+        "spec" to (model?.specVersion ?: MultiHorizonEngine.SPEC_VERSION),
+        "mode" to "DIRECT (on-device ingestion)",
+        "android" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / API ${android.os.Build.VERSION.SDK_INT}",
+        "lastRefresh" to (model?.generatedAt?.toString() ?: "never"),
+        "filter" to (logFilter.ifBlank { "none" }),
+        "minLevel" to logMinLevel.name
+    )
+
+    private fun copyLog() {
+        val text = DiagnosticLog.shared.toPlainText(logHeader())
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("Gold Intelligence log", text))
+        toast(
+            if (persian) "گزارش در حافظه کپی شد (${text.length} نویسه)"
+            else "Log copied to clipboard (${text.length} chars)"
+        )
+    }
+
+    /**
+     * Saves through the Storage Access Framework, so the file lands wherever
+     * the user chooses and the app needs no storage permission.
+     */
+    private fun exportLog(markdown: Boolean) {
+        val stamp = java.time.format.DateTimeFormatter
+            .ofPattern("yyyyMMdd-HHmmss")
+            .withZone(java.time.ZoneOffset.UTC)
+            .format(Instant.now())
+        val name = "gold-intelligence-log-$stamp." + if (markdown) "md" else "txt"
+        val body = if (markdown) DiagnosticLog.shared.toMarkdown(logHeader())
+        else DiagnosticLog.shared.toPlainText(logHeader())
+        pendingExport = name to body
+
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = if (markdown) "text/markdown" else "text/plain"
+            putExtra(Intent.EXTRA_TITLE, name)
+        }
+        try {
+            startActivityForResult(intent, REQ_EXPORT_LOG)
+        } catch (_: Exception) {
+            // No document provider on the device: fall back to the app's own
+            // external files directory, which needs no permission either.
+            writeFallback(name, body)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_EXPORT_LOG) return
+        val pending = pendingExport ?: return
+        pendingExport = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            toast(if (persian) "ذخیره لغو شد" else "Save cancelled")
+            return
+        }
+        try {
+            contentResolver.openOutputStream(uri)?.use {
+                it.write(pending.second.toByteArray(Charsets.UTF_8))
+            }
+            toast(if (persian) "ذخیره شد: ${pending.first}" else "Saved: ${pending.first}")
+        } catch (e: Exception) {
+            toast("${e.javaClass.simpleName}: ${e.message}")
+            writeFallback(pending.first, pending.second)
+        }
+    }
+
+    private fun writeFallback(name: String, body: String) {
+        try {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            val file = java.io.File(dir, name)
+            file.writeText(body, Charsets.UTF_8)
+            toast((if (persian) "ذخیره شد: " else "Saved: ") + file.absolutePath)
+        } catch (e: Exception) {
+            toast("${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     private fun renderScreen(screen: Screen) {
@@ -423,6 +740,7 @@ class MainActivity : Activity() {
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         private const val AUTO_REFRESH_MS = 60_000L
+        private const val REQ_EXPORT_LOG = 7301
 
         private val BG = Color.parseColor("#0B0D10")
         private val PANEL = Color.parseColor("#12161B")

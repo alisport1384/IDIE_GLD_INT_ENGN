@@ -114,7 +114,7 @@ class QualityGateTest {
 
 class DataContractTest {
     @Test
-    fun `restricted licences forbid raw publication`() {
+    fun `publication is not licence-gated`() {
         fun point(license: LicenseClass) = DataPoint(
             seriesId = "X", value = 1.0, unit = "u",
             observationTimestamp = Instant.EPOCH, releaseTimestamp = null, ingestTimestamp = Instant.EPOCH,
@@ -123,10 +123,9 @@ class DataContractTest {
             frequency = Frequency.DAILY, latencySeconds = 0, validationStatus = ValidationStatus.PASSED,
             minHorizon = Horizon.D1
         )
-        assertTrue(point(LicenseClass.PUBLIC_DOMAIN).rawPublishable)
-        assertTrue(point(LicenseClass.ATTRIBUTION).rawPublishable)
-        assertFalse(point(LicenseClass.RESTRICTED).rawPublishable)
-        assertFalse(point(LicenseClass.UNKNOWN).rawPublishable)
+        LicenseClass.entries.forEach {
+            assertTrue("licence $it must not block display", point(it).rawPublishable)
+        }
     }
 }
 
@@ -218,7 +217,7 @@ class PipelineTest {
     }
 
     @Test
-    fun `screens cover the six normative surfaces`() {
+    fun `screens cover the seven normative surfaces`() {
         val u = universe()
         val features = SpecFeatureEngineer().build(u)
         val factors = SpecFactorEngine().score(features, now)
@@ -232,7 +231,7 @@ class PipelineTest {
         )
         val model = ScreenModelBuilder().build(report, u, features, factors.diagnostics)
         assertEquals(
-            listOf("STATE", "FACTORS", "INDICATORS", "HORIZONS", "EVENTS", "DIAGNOSTICS"),
+            listOf("STATE", "FACTORS", "INDICATORS", "HORIZONS", "EVENTS", "DIAGNOSTICS", "LOGS"),
             model.screens.map { it.id }
         )
         val indicators = model.screens.first { it.id == "INDICATORS" }
@@ -243,5 +242,63 @@ class PipelineTest {
         val horizons = model.screens.first { it.id == "HORIZONS" }
         assertEquals(6, horizons.sections.first().rows.size)
         assertTrue(model.attribution.isNotEmpty())
+    }
+
+    /** §21 — the logger is its own surface, and it stays separate from the content. */
+    @Test
+    fun `logger screen is built only from the diagnostic log`() {
+        val log = io.goldintelligence.engine.DiagnosticLog()
+        log.info(
+            io.goldintelligence.engine.LogStage.NETWORK, "TestProvider", "HTTP_200",
+            "fetched 128 rows", key = "TEST_SERIES"
+        )
+        log.error(
+            io.goldintelligence.engine.LogStage.NETWORK, "BrokenProvider", "HTTP_403",
+            "forbidden", key = "BROKEN_SERIES"
+        )
+        val u = universe()
+        val features = SpecFeatureEngineer().build(u)
+        val factors = SpecFactorEngine().score(features, now)
+        val snapshot = io.goldintelligence.engine.InputSnapshot(
+            observations = emptyMap(),
+            features = SpecFeatureEngineer().toFeatureSet(features),
+            factorScores = factors.scores
+        )
+        val report = io.goldintelligence.engine.MultiHorizonEngine().evaluate(
+            snapshot, io.goldintelligence.engine.MarketContext(spotPrice = 4175.5), now
+        )
+        val model = ScreenModelBuilder(log).build(report, u, features, factors.diagnostics)
+        val logs = model.screens.first { it.id == ScreenModel.SCREEN_LOGS }
+
+        val text = logs.sections.flatMap { it.rows }
+            .joinToString(" ") { "${it.labelEn} ${it.value} ${it.noteEn}" }
+        assertTrue("the failing indicator is named", text.contains("BROKEN_SERIES"))
+        assertTrue("the reason is named", text.contains("HTTP_403"))
+        assertTrue("the healthy indicator is named", text.contains("TEST_SERIES"))
+
+        // The log must not bleed into any analytical screen.
+        val others = model.screens.filter { it.id != ScreenModel.SCREEN_LOGS }
+            .flatMap { it.sections }.flatMap { it.rows }
+            .joinToString(" ") { "${it.labelEn} ${it.value}" }
+        assertTrue("no log line on the analytical screens", !others.contains("HTTP_403"))
+    }
+
+    /** The exports must carry the same failure detail the screen shows. */
+    @Test
+    fun `log exports name the failing indicator and the reason`() {
+        val log = io.goldintelligence.engine.DiagnosticLog()
+        log.error(
+            io.goldintelligence.engine.LogStage.PARSE, "CalendarProvider", "SCHEMA_MISMATCH",
+            "field forecast absent", key = "CALENDAR_CONSENSUS"
+        )
+        val md = log.toMarkdown(mapOf("spec" to "v2.1"))
+        val txt = log.toPlainText(mapOf("spec" to "v2.1"))
+        listOf(md, txt).forEach { out ->
+            assertTrue(out.contains("CALENDAR_CONSENSUS"))
+            assertTrue(out.contains("SCHEMA_MISMATCH"))
+            assertTrue(out.contains("field forecast absent"))
+            assertTrue(out.contains("v2.1"))
+        }
+        assertTrue("markdown is tabular", md.contains("|"))
     }
 }

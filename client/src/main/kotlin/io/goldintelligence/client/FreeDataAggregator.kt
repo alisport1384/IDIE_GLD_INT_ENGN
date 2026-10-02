@@ -1,7 +1,9 @@
 package io.goldintelligence.client
 
 import io.goldintelligence.engine.DataQuality
+import io.goldintelligence.engine.DiagnosticLog
 import io.goldintelligence.engine.Horizon
+import io.goldintelligence.engine.LogStage
 import io.goldintelligence.engine.Tier
 import io.goldintelligence.ingestion.DataPoint
 import io.goldintelligence.ingestion.Frequency
@@ -40,7 +42,8 @@ data class RefreshPolicy(
  */
 class FreeDataAggregator(
     private val http: HttpClient = HttpClient(),
-    private val policy: RefreshPolicy = RefreshPolicy()
+    private val policy: RefreshPolicy = RefreshPolicy(),
+    private val log: DiagnosticLog = DiagnosticLog.shared
 ) {
     private val cboe = CboeProvider(http)
     private val goldApi = GoldApiProvider(http)
@@ -49,6 +52,35 @@ class FreeDataAggregator(
     private val nyFed = NyFedProvider(http)
     private val fx = FxProvider(http)
     private val yahoo = YahooProvider(http)
+
+    // SPEC v2.1 — providers that close the previously unreachable gaps.
+    private val tradingView = TradingViewProvider(http, log)
+    private val kraken = KrakenProvider(http, log)
+    private val okx = OkxProvider(http, log)
+    private val swissquote = SwissquoteProvider(http, log)
+    private val sina = SinaProvider(http, log)
+    private val calendar = ForexFactoryProvider(http, log)
+    private val bls = BlsProvider(http, log)
+    private val goldPriceOrg = GoldPriceOrgProvider(http)
+    private val wgc = WorldGoldCouncilProvider(http, log)
+
+    /** Last calendar read, exposed so the EVENTS screen can render it. */
+    @Volatile
+    var lastCalendar: List<CalendarEvent> = emptyList()
+        private set
+
+    /** Last captured order books, exposed for the microstructure rows. */
+    @Volatile
+    var lastBooks: List<OrderBookDepth> = emptyList()
+        private set
+
+    @Volatile
+    var lastOtcTiers: List<SizeTierQuote> = emptyList()
+        private set
+
+    @Volatile
+    var lastGoldCurve: List<Pair<String, Double>> = emptyList()
+        private set
 
     private class Cached<T>(val value: T, val at: Instant)
 
@@ -59,6 +91,11 @@ class FreeDataAggregator(
     private var cotCache: Cached<List<CftcProvider.CotRow>>? = null
     private var curveCache: Cached<Map<String, Double>>? = null
     private var fundingCache: Cached<TimeSeries>? = null
+    private var tvCache: Cached<Map<String, TvQuote>>? = null
+    private var goldHistoryCache: Cached<TimeSeries>? = null
+    private var benchmarkCache: Cached<TimeSeries>? = null
+    private var calendarCache: Cached<List<CalendarEvent>>? = null
+    private var blsCache: Cached<Map<String, Double>>? = null
 
     private fun <T> fresh(c: Cached<T>?, ttl: Duration, now: Instant): T? =
         c?.takeIf { Duration.between(it.at, now) < ttl }?.value
@@ -115,7 +152,13 @@ class FreeDataAggregator(
             min: Double? = null,
             max: Double? = null
         ) {
-            if (value == null) return
+            if (value == null) {
+                log.warn(
+                    LogStage.FEATURE, provider.id, "VALUE_ABSENT",
+                    "provider returned no value for this series", key = id
+                )
+                return
+            }
             val ts = observedAt ?: now
             val verdict = QualityGates.check(
                 value = value,
@@ -124,7 +167,20 @@ class FreeDataAggregator(
                 spec = QualityGates.Spec(maxAge = expectedPeriod.multipliedBy(3), min = min, max = max),
                 datasetSize = datasetSize
             )
-            if (!verdict.accepted) return
+            if (!verdict.accepted) {
+                log.error(
+                    LogStage.QUALITY, provider.id, "GATE_" + verdict.failed.joinToString("+"),
+                    "rejected by quality gate", key = id,
+                    detail = "value=$value observedAt=$ts"
+                )
+                return
+            }
+            if (verdict.status == ValidationStatus.DEGRADED) {
+                log.warn(
+                    LogStage.QUALITY, provider.id, "DEGRADED",
+                    "accepted but flagged: " + verdict.failed.joinToString().ifBlank { "stale" }, key = id
+                )
+            }
             val age = Duration.between(ts, now).seconds.coerceAtLeast(0)
             val quality = DataQuality.score(
                 tier = provider.tier,
@@ -156,6 +212,7 @@ class FreeDataAggregator(
                 else if (frequency == Frequency.DAILY) Horizon.D1 else Horizon.M5
             )
             scalars[id] = value
+            log.debug(LogStage.FEATURE, provider.id, "INGESTED", "$value $unit", key = id)
         }
 
         /* ---- Cboe quotes ------------------------------------------- */
@@ -330,6 +387,199 @@ class FreeDataAggregator(
             yahoo.chart("GC=F", "1d", "2y")?.let { series[MarketUniverse.GOLD_FUT_FRONT] = it }
         }
 
+        /* ---- SPEC v2.1 · TradingView: curve, open interest, regional ---- */
+        val tv = fresh(tvCache, policy.quoteTtl, now) ?: run {
+            val got = tradingView.quotes(TradingViewProvider.CORE + TradingViewProvider.GOLD_CURVE)
+            if (got.isNotEmpty()) tvCache = Cached(got, now)
+            got
+        }
+
+        if (tv.isNotEmpty()) {
+            lastGoldCurve = tradingView.goldCurve(tv)
+
+            tv["COMEX:GC1!"]?.let { q ->
+                record(MarketUniverse.GOLD_FUT_FRONT, q.close, "USD/oz", Providers.TRADINGVIEW, now,
+                    Frequency.MINUTE, Duration.ofMinutes(30), min = 100.0, max = 100_000.0)
+                // The gap the first survey recorded as WEEKLY_ONLY: a daily
+                // open-interest print, not the CFTC weekly report.
+                record(MarketUniverse.GOLD_OI_DAILY, q.openInterest, "contracts", Providers.TRADINGVIEW, now,
+                    Frequency.DAILY, Duration.ofDays(1), min = 0.0)
+                record(MarketUniverse.GOLD_FUT_VOLUME, q.volume, "contracts", Providers.TRADINGVIEW, now,
+                    Frequency.DAILY, Duration.ofDays(1), min = 0.0)
+            }
+            lastGoldCurve.lastOrNull()?.let { (_, px) ->
+                record(MarketUniverse.GOLD_FUT_DEFERRED, px, "USD/oz", Providers.TRADINGVIEW, now,
+                    Frequency.MINUTE, Duration.ofMinutes(30), min = 100.0, max = 100_000.0)
+            }
+            tv["TVC:DXY"]?.close?.let { dxy ->
+                record(MarketUniverse.DXY_INDEX, dxy, "index", Providers.TRADINGVIEW, now,
+                    Frequency.MINUTE, Duration.ofMinutes(30), min = 30.0, max = 250.0)
+            }
+            tv["SHFE:AU1!"]?.close?.let {
+                record(MarketUniverse.SHFE_GOLD_CNY_G, it, "CNY/g", Providers.TRADINGVIEW, now,
+                    Frequency.MINUTE, Duration.ofHours(24), min = 1.0)
+            }
+            tv["MCX:GOLD1!"]?.close?.let {
+                record(MarketUniverse.MCX_GOLD_INR_10G, it, "INR/10g", Providers.TRADINGVIEW, now,
+                    Frequency.MINUTE, Duration.ofHours(24), min = 1.0)
+            }
+        }
+
+        /* ---- SPEC v2.1 · Shanghai Gold Exchange Au(T+D) ----------------- */
+        val sgeCnyPerGram = sina.shanghaiGoldCnyPerGram()
+        if (sgeCnyPerGram != null) {
+            record(MarketUniverse.SGE_GOLD_CNY_G, sgeCnyPerGram, "CNY/g", Providers.SINA_SGE, now,
+                Frequency.MINUTE, Duration.ofHours(24), min = 1.0)
+        }
+
+        /* ---- SPEC v2.1 · regional physical premia ----------------------- */
+        val spotUsdOz = scalars[MarketUniverse.GOLD_SPOT]
+        val usdCny = series[MarketUniverse.FX_CNY]?.last?.close
+        val usdInr = series[MarketUniverse.FX_INR]?.last?.close
+        val chinaCnyPerGram = scalars[MarketUniverse.SGE_GOLD_CNY_G]
+            ?: scalars[MarketUniverse.SHFE_GOLD_CNY_G]
+        if (spotUsdOz != null && usdCny != null && usdCny > 0 && chinaCnyPerGram != null) {
+            val chinaUsdOz = chinaCnyPerGram / usdCny * SinaProvider.GRAMS_PER_TROY_OUNCE
+            record(MarketUniverse.CHINA_PREMIUM_PCT, (chinaUsdOz / spotUsdOz - 1.0) * 100.0, "%",
+                Providers.SINA_SGE, now, Frequency.DAILY, Duration.ofHours(24), min = -30.0, max = 30.0)
+        } else {
+            log.warn(
+                LogStage.FEATURE, "FreeDataAggregator", "PREMIUM_INPUTS_MISSING",
+                "need spot, USDCNY and a Chinese gold quote", key = MarketUniverse.CHINA_PREMIUM_PCT,
+                detail = "spot=$spotUsdOz usdCny=$usdCny cnyPerGram=$chinaCnyPerGram"
+            )
+        }
+        val mcx = scalars[MarketUniverse.MCX_GOLD_INR_10G]
+        if (spotUsdOz != null && usdInr != null && usdInr > 0 && mcx != null) {
+            val indiaUsdOz = mcx / 10.0 / usdInr * SinaProvider.GRAMS_PER_TROY_OUNCE
+            record(MarketUniverse.INDIA_PREMIUM_PCT, (indiaUsdOz / spotUsdOz - 1.0) * 100.0, "%",
+                Providers.TRADINGVIEW, now, Frequency.DAILY, Duration.ofHours(24), min = -30.0, max = 60.0)
+        } else {
+            log.warn(
+                LogStage.FEATURE, "FreeDataAggregator", "PREMIUM_INPUTS_MISSING",
+                "need spot, USDINR and the MCX quote", key = MarketUniverse.INDIA_PREMIUM_PCT,
+                detail = "spot=$spotUsdOz usdInr=$usdInr mcx=$mcx"
+            )
+        }
+
+        /* ---- SPEC v2.1 · real gold order books -------------------------- */
+        val books = listOfNotNull(kraken.depth(), okx.depth())
+        lastBooks = books
+        if (books.isEmpty()) {
+            log.error(
+                LogStage.FEATURE, "FreeDataAggregator", "NO_ORDER_BOOK",
+                "neither gold venue returned a book", key = MarketUniverse.BOOK_IMBALANCE
+            )
+        } else {
+            val bidVol = books.sumOf { it.bidVolume }
+            val askVol = books.sumOf { it.askVolume }
+            val total = bidVol + askVol
+            if (total > 0) {
+                record(MarketUniverse.BOOK_IMBALANCE, (bidVol - askVol) / total, "-1..1",
+                    Providers.KRAKEN, now, Frequency.TICK, Duration.ofMinutes(10), min = -1.0, max = 1.0)
+            }
+            record(MarketUniverse.BOOK_BID_VOLUME, bidVol, "oz", Providers.KRAKEN, now,
+                Frequency.TICK, Duration.ofMinutes(10), min = 0.0)
+            record(MarketUniverse.BOOK_ASK_VOLUME, askVol, "oz", Providers.KRAKEN, now,
+                Frequency.TICK, Duration.ofMinutes(10), min = 0.0)
+            record(MarketUniverse.BOOK_SPREAD_BP, books.minOf { it.spreadBp }, "bp",
+                Providers.KRAKEN, now, Frequency.TICK, Duration.ofMinutes(10), min = 0.0)
+            record(MarketUniverse.BOOK_DEPTH_LEVELS, books.sumOf { it.bidLevels + it.askLevels }.toDouble(),
+                "levels", Providers.KRAKEN, now, Frequency.TICK, Duration.ofMinutes(10), min = 0.0)
+        }
+
+        val tiers = swissquote.tiers()
+        lastOtcTiers = tiers
+        tiers.minByOrNull { it.spreadBp }?.let {
+            record(MarketUniverse.OTC_SPREAD_BP, it.spreadBp, "bp", Providers.SWISSQUOTE, now,
+                Frequency.TICK, Duration.ofMinutes(10), min = 0.0)
+        }
+
+        /* ---- SPEC v2.1 · gold's own daily history ----------------------- */
+        val goldHistory = fresh(goldHistoryCache, policy.historyTtl, now)
+            ?: (kraken.dailyHistory() ?: okx.dailyHistory())?.also { goldHistoryCache = Cached(it, now) }
+        if (goldHistory != null && goldHistory.bars.size >= 30) {
+            series[MarketUniverse.GOLD_SPOT_HISTORY] = goldHistory
+            record(MarketUniverse.GOLD_SPOT_HISTORY, goldHistory.last?.close, "USD/oz",
+                Providers.KRAKEN, goldHistory.last?.timestamp, Frequency.DAILY, Duration.ofDays(1),
+                datasetSize = goldHistory.bars.size, min = 100.0, max = 100_000.0)
+        }
+
+        /* ---- SPEC v2.1 · LBMA benchmark via the World Gold Council ------ */
+        val benchmark = fresh(benchmarkCache, policy.weeklyTtl, now)
+            ?: wgc.benchmark()?.series?.also { benchmarkCache = Cached(it, now) }
+        if (benchmark != null && benchmark.bars.isNotEmpty()) {
+            series[MarketUniverse.LBMA_BENCHMARK] = benchmark
+            record(MarketUniverse.LBMA_BENCHMARK, benchmark.last?.close, "USD/oz",
+                Providers.WGC, benchmark.last?.timestamp, Frequency.MONTHLY, Duration.ofDays(35),
+                datasetSize = benchmark.bars.size, min = 1.0)
+        }
+
+        /* ---- SPEC v2.1 · cross-source spot agreement -------------------- */
+        val spotReadings = listOfNotNull(
+            scalars[MarketUniverse.GOLD_SPOT],
+            goldPriceOrg.latest()?.gold,
+            tv["TVC:GOLD"]?.close,
+            tv["OANDA:XAUUSD"]?.close,
+            books.firstOrNull()?.mid
+        )
+        if (spotReadings.size >= 2) {
+            val mean = spotReadings.average()
+            val dispersion = (spotReadings.max() - spotReadings.min()) / mean * 10_000.0
+            record(MarketUniverse.SPOT_CONSENSUS_BP, dispersion, "bp", Providers.GOLDPRICE_ORG, now,
+                Frequency.TICK, Duration.ofMinutes(15), min = 0.0)
+            log.info(
+                LogStage.QUALITY, "FreeDataAggregator", "SPOT_CROSSCHECK",
+                "${spotReadings.size} independent spot sources agree to ${"%.1f".format(dispersion)} bp",
+                key = MarketUniverse.SPOT_CONSENSUS_BP
+            )
+        }
+
+        /* ---- SPEC v2.1 · economic calendar and consensus ---------------- */
+        val events = fresh(calendarCache, policy.curveTtl, now) ?: calendar.events().also {
+            if (it.isNotEmpty()) calendarCache = Cached(it, now)
+        }
+        lastCalendar = events
+        if (events.isNotEmpty()) {
+            val horizon = now.plus(Duration.ofHours(24))
+            val upcoming = events.filter { it.time.isAfter(now) }
+            record(
+                MarketUniverse.CALENDAR_HIGH_IMPACT_24H,
+                upcoming.count { it.highImpact && it.time.isBefore(horizon) }.toDouble(),
+                "events", Providers.FOREXFACTORY, now, Frequency.DAILY, Duration.ofHours(12), min = 0.0
+            )
+            upcoming.firstOrNull { it.highImpact }?.let { next ->
+                record(
+                    MarketUniverse.CALENDAR_NEXT_EVENT_HOURS,
+                    Duration.between(now, next.time).toMinutes() / 60.0,
+                    "h", Providers.FOREXFACTORY, now, Frequency.DAILY, Duration.ofHours(12), min = 0.0
+                )
+            }
+        }
+
+        /* ---- SPEC v2.1 · official actuals, for a real surprise ---------- */
+        val official = fresh(blsCache, policy.weeklyTtl, now) ?: buildMap {
+            bls.cpiYoY()?.let { put(MarketUniverse.CPI_YOY, it) }
+            bls.unemploymentRate()?.let { put(MarketUniverse.UNEMPLOYMENT_RATE, it) }
+        }.also { if (it.isNotEmpty()) blsCache = Cached(it, now) }
+        official[MarketUniverse.CPI_YOY]?.let {
+            record(MarketUniverse.CPI_YOY, it, "%", Providers.BLS, now,
+                Frequency.MONTHLY, Duration.ofDays(35), min = -20.0, max = 50.0)
+        }
+        official[MarketUniverse.UNEMPLOYMENT_RATE]?.let {
+            record(MarketUniverse.UNEMPLOYMENT_RATE, it, "%", Providers.BLS, now,
+                Frequency.MONTHLY, Duration.ofDays(35), min = 0.0, max = 40.0)
+        }
+        consensusSurprise(events, official)?.let {
+            record(MarketUniverse.CONSENSUS_SURPRISE, it, "z", Providers.FOREXFACTORY, now,
+                Frequency.MONTHLY, Duration.ofDays(35), min = -10.0, max = 10.0)
+        }
+
+        log.info(
+            LogStage.FEATURE, "FreeDataAggregator", "REFRESH_COMPLETE",
+            "${series.size} series, ${scalars.size} scalars, ${points.size} provenance records"
+        )
+
         return MarketUniverse(
             asOf = now,
             series = series,
@@ -340,6 +590,40 @@ class FreeDataAggregator(
     }
 
     fun providerHealth(): Map<String, ProviderHealth> = http.healthSnapshot()
+
+    /**
+     * Standardised surprise where a surveyed consensus and an official actual
+     * describe the same release. Only releases whose actual is published by a
+     * statistical agency are used, so the surprise is measured, not guessed.
+     */
+    private fun consensusSurprise(
+        events: List<CalendarEvent>,
+        official: Map<String, Double>
+    ): Double? {
+        val pairs = ArrayList<Pair<Double, Double>>()
+        official[MarketUniverse.CPI_YOY]?.let { actual ->
+            events.firstOrNull { it.country == "USD" && it.title.startsWith("CPI y/y", true) }
+                ?.forecastValue?.let { pairs += actual to it }
+        }
+        official[MarketUniverse.UNEMPLOYMENT_RATE]?.let { actual ->
+            events.firstOrNull { it.country == "USD" && it.title.startsWith("Unemployment Rate", true) }
+                ?.forecastValue?.let { pairs += actual to it }
+        }
+        if (pairs.isEmpty()) {
+            log.debug(
+                LogStage.FEATURE, "FreeDataAggregator", "NO_MATCHED_RELEASE",
+                "no release this week pairs a consensus with a published actual",
+                key = MarketUniverse.CONSENSUS_SURPRISE
+            )
+            return null
+        }
+        // Normalised by the consensus level so percentage-point series and
+        // index series are comparable.
+        return pairs.map { (actual, forecast) ->
+            val scale = kotlin.math.max(kotlin.math.abs(forecast), 0.1)
+            (actual - forecast) / scale
+        }.average()
+    }
 
     /** Replaces the last daily bar with the live quote when the quote is newer. */
     private fun spliceQuote(s: TimeSeries, q: CboeQuote?): TimeSeries {
