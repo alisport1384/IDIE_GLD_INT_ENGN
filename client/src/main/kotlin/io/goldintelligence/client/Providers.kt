@@ -109,6 +109,13 @@ object Providers {
         "LBMA-based gold benchmark series published by the World Gold Council"
     )
 
+    /**
+     * Providers the pipeline can lose without losing a published value:
+     * Yahoo's futures history is covered by the Cboe GLD series and the
+     * TradingView curve, and the Eastmoney mirror only backs up Sina.
+     */
+    val optionalIds: Set<String> = setOf("YAHOO", "EASTMONEY_SGE")
+
     val all = listOf(
         CBOE, GOLD_API, TREASURY, CFTC, NY_FED, ECB_FX, YAHOO,
         TRADINGVIEW, KRAKEN, OKX, SWISSQUOTE, SINA_SGE, EASTMONEY_SGE,

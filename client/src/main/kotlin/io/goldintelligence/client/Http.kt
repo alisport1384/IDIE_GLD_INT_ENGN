@@ -39,7 +39,14 @@ class HttpClient(
     private val minIntervalMillis: Long = 250,
     private val maxRetries: Int = 2,
     private val circuitOpenDuration: Duration = Duration.ofMinutes(15),
-    private val log: DiagnosticLog = DiagnosticLog.shared
+    private val log: DiagnosticLog = DiagnosticLog.shared,
+    /**
+     * Providers whose failure the pipeline is designed to absorb. Their
+     * refusals are still recorded in full, but at WARN: an ERROR in this log
+     * means something nobody handled, and a rate limit on a provider with a
+     * declared fallback is not that.
+     */
+    private val optionalProviders: Set<String> = Providers.optionalIds
 ) {
     private val lastCall = ConcurrentHashMap<String, Long>()
     private val circuitUntil = ConcurrentHashMap<String, Instant>()
@@ -86,13 +93,20 @@ class HttpClient(
             // 429/403 are provider-side refusals: open the breaker, do not retry harder.
             if (r.status == 429 || r.status == 403) {
                 circuitUntil[providerId] = Instant.now().plus(circuitOpenDuration)
-                log.error(
-                    LogStage.NETWORK, providerId, "HTTP_" + r.status,
-                    "provider refused the request; breaker opened for " +
-                        circuitOpenDuration.toMinutes() + " min",
-                    detail = url
+                val optional = providerId in optionalProviders
+                log.log(
+                    level = if (optional) LogLevel.WARN else LogLevel.ERROR,
+                    stage = LogStage.NETWORK,
+                    component = providerId,
+                    code = if (optional) "PROVIDER_UNAVAILABLE" else "HTTP_" + r.status,
+                    message = "refused with HTTP " + r.status +
+                        "; breaker opened for " + circuitOpenDuration.toMinutes() + " min" +
+                        if (optional) ", the declared fallback is used instead" else "",
+                    url = url,
+                    httpStatus = r.status
                 )
-                break
+                record(providerId, r, Instant.now())
+                return r
             }
             if (attempt < maxRetries) {
                 try {
@@ -152,7 +166,11 @@ class HttpClient(
 
     private fun logResponse(providerId: String, r: HttpResponse) {
         log.log(
-            level = if (r.ok) LogLevel.DEBUG else LogLevel.ERROR,
+            level = when {
+                r.ok -> LogLevel.DEBUG
+                providerId in optionalProviders -> LogLevel.WARN
+                else -> LogLevel.ERROR
+            },
             stage = LogStage.NETWORK,
             component = providerId,
             code = when {

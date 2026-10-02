@@ -305,19 +305,52 @@ class MainActivity : Activity() {
      */
 
     private fun renderChart() {
+        val c = chart
+        ChartHandoff.payload = c
+        ChartHandoff.persian = persian
+
         content.addView(chartControls())
+        if (c != null) content.addView(verdictStrip(c))
 
         val view = chartView ?: ChartView(this).also { chartView = it }
         (view.parent as? ViewGroup)?.removeView(view)
-        view.bind(chart, persian)
-        view.layoutParams = LinearLayout.LayoutParams(MATCH, dp(320))
+        view.overlayVisible = false
+        view.bind(c, persian)
+        view.onTap = { openFullscreen() }
+        view.layoutParams = LinearLayout.LayoutParams(MATCH, dp(300)).apply { bottomMargin = dp(6) }
         content.addView(view)
+        content.addView(
+            note(
+                if (persian)
+                    "برای جابه‌جایی، چارت را بکشید · برای تمام‌صفحه، روی چارت یا دکمهٔ ⛶ بزنید"
+                else
+                    "drag to pan · tap the chart or ⛶ for full screen"
+            )
+        )
 
-        val c = chart
         if (c == null) {
             content.addView(note(if (persian) "فید چارت هنوز دریافت نشده است." else "Chart feed not received yet."))
             return
         }
+
+        content.addView(sectionHeader(if (persian) "سطوح قفل‌شده به قیمت" else "Price-anchored levels"))
+        val levelCard = cardBox()
+        if (c.levels.isEmpty()) {
+            levelCard.addView(renderRow(Row("—", "No level anchored", "N/A")))
+        } else {
+            c.levels.forEachIndexed { i, l ->
+                if (i > 0) levelCard.addView(divider())
+                levelCard.addView(
+                    renderRow(
+                        Row(
+                            l.labelFa, l.labelEn, "%.3f".format(l.price),
+                            listOf(Badge(l.kind.name, BadgeKind.INFO))
+                        )
+                    )
+                )
+            }
+        }
+        content.addView(levelCard)
 
         if (c.dual.isNotEmpty()) {
             content.addView(sectionHeader(if (persian) "تحلیل دوگانه" else "Dual analysis"))
@@ -429,6 +462,108 @@ class MainActivity : Activity() {
         content.addView(exCard)
     }
 
+    /** One compact line of verdict above the plot; the canvas stays clean. */
+    private fun verdictStrip(c: ChartPayload): View {
+        val h = c.headline
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(6) }
+        }
+
+        val dirColor = when (h.direction) {
+            "BULLISH" -> GREEN
+            "BEARISH" -> RED
+            else -> MUTED_HI
+        }
+        val arrow = when (h.direction) {
+            "BULLISH" -> " ▲"
+            "BEARISH" -> " ▼"
+            else -> ""
+        }
+        val price = c.quote?.last?.let { "%.2f".format(it) } ?: "—"
+        val line1 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        line1.addView(TextView(this).apply {
+            text = price
+            setTextColor(TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        })
+        line1.addView(TextView(this).apply {
+            text = "  " + (if (persian) faDirection(h.direction) else h.direction) + arrow
+            setTextColor(dirColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(6) }
+        })
+        line1.addView(TextView(this).apply {
+            text = "⛶"
+            setTextColor(ACCENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            setPadding(dp(10), dp(2), dp(4), dp(2))
+            setOnClickListener { openFullscreen() }
+        })
+        box.addView(line1)
+
+        box.addView(TextView(this).apply {
+            text = listOfNotNull(
+                h.horizon,
+                h.confidence?.let { (if (persian) "اطمینان " else "conf ") + "%.0f%%".format(it * 100) },
+                h.bias?.let { (if (persian) "سوگیری " else "bias ") + "%+.0f".format(it) },
+                h.regime,
+                h.signalState
+            ).joinToString("  ·  ")
+            setTextColor(MUTED_HI)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(0, dp(3), 0, 0)
+        })
+
+        val changed = c.deltas.filter { it.changed }
+        box.addView(TextView(this).apply {
+            text = if (changed.isEmpty()) {
+                if (persian) "بدون تغییر نسبت به اجرای قبلی" else "no change since last refresh"
+            } else {
+                changed.take(3).joinToString("   ") {
+                    (if (it.direction > 0) "▲" else if (it.direction < 0) "▼" else "•") +
+                        " " + (if (persian) it.labelFa else it.labelEn) + " " + it.previous + "→" + it.current
+                }
+            }
+            setTextColor(if (changed.isEmpty()) MUTED else AMBER)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(0, dp(3), 0, 0)
+        })
+
+        if (c.series.seededBars > 0) {
+            box.addView(TextView(this).apply {
+                text = if (persian)
+                    "کندل توخالی: ${c.series.seededBars} پیش‌بار بازمقیاس‌شده از ${c.series.seedSource ?: "—"}"
+                else
+                    "hollow candles: ${c.series.seededBars} rebased seed bars from ${c.series.seedSource ?: "—"}"
+                setTextColor(MUTED)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setPadding(0, dp(3), 0, 0)
+            })
+        }
+        return box
+    }
+
+    private fun faDirection(d: String): String = when (d) {
+        "BULLISH" -> "صعودی"
+        "BEARISH" -> "نزولی"
+        "NEUTRAL" -> "خنثی"
+        else -> d
+    }
+
+    private fun openFullscreen() {
+        ChartHandoff.payload = chart
+        ChartHandoff.persian = persian
+        startActivity(Intent(this, ChartFullscreenActivity::class.java))
+    }
+
     private fun chartControls(): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -489,6 +624,17 @@ class MainActivity : Activity() {
             })
         }
         box.addView(frames)
+
+        box.addView(Button(this).apply {
+            text = if (persian) "⛶  تمام‌صفحه" else "⛶  Full screen"
+            isAllCaps = false
+            setTextColor(BG)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            background = pill(ACCENT, ACCENT_DIM)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) }
+            setOnClickListener { openFullscreen() }
+        })
         return box
     }
 

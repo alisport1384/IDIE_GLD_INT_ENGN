@@ -449,8 +449,11 @@ class ChartOverlayBuilder(private val log: DiagnosticLog = DiagnosticLog.shared)
             }
         }
 
-        // Anything the rest of the pipeline logged as an error this refresh is
-        // surfaced on the chart too, so a silent failure cannot hide behind it.
+        // Everything above is discovered by the chart itself and is logged by
+        // the chart. What follows is mirrored from other stages: shown here so
+        // a silent failure cannot hide, but logged only as a mirror.
+        val derived = out.toList()
+
         // The chart's own re-emissions are excluded, otherwise each refresh
         // would wrap the previous refresh's entry and the codes would nest.
         log.failures()
@@ -472,14 +475,20 @@ class ChartOverlayBuilder(private val log: DiagnosticLog = DiagnosticLog.shared)
                 )
             }
 
-        out.forEach {
-            log.log(
-                level = if (it.severity == "ERROR") LogLevel.ERROR else LogLevel.WARN,
-                stage = LogStage.CHART,
-                component = "ChartOverlayBuilder",
-                code = EXCEPTION_PREFIX + it.code,
-                message = it.messageEn,
-                key = CHART_KEY
+        // A chart-derived exception is a handled, displayed condition, so it is
+        // recorded at WARN; ERROR in this log stays reserved for a failure
+        // nobody caught. A mirrored entry was already logged at its own stage
+        // and is only noted here, at DEBUG, so the log cannot double-count it.
+        derived.forEach {
+            log.warn(
+                LogStage.CHART, "ChartOverlayBuilder", EXCEPTION_PREFIX + it.code,
+                it.messageEn, key = CHART_KEY
+            )
+        }
+        out.drop(derived.size).forEach {
+            log.debug(
+                LogStage.CHART, "ChartOverlayBuilder", "EXCEPTION_MIRRORED",
+                "${it.code} (${it.component}) shown on the chart", key = CHART_KEY
             )
         }
         return out.distinctBy { it.code to it.component }

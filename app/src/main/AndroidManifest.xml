@@ -20,5 +20,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- SPEC v2.1 §22: the chart on the whole screen, landscape by default. -->
+        <activity
+            android:name=".ChartFullscreenActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+            android:theme="@style/AppTheme.Fullscreen"
+            android:label="Gold Intelligence — Chart" />
     </application>
 </manifest>

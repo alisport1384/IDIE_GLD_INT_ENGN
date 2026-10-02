@@ -5,7 +5,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.view.MotionEvent
 import android.view.View
 import io.goldintelligence.client.BarOrigin
 import io.goldintelligence.client.Candle
@@ -14,290 +16,417 @@ import io.goldintelligence.client.LevelKind
 import io.goldintelligence.client.PriceLevel
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * SPEC v2.1 §22 — the price surface.
  *
- * Candles and the engine's own output are drawn in the same coordinate space,
- * so a level the engine published sits exactly where that price is. Bars that
- * were seeded from another venue are drawn hollow and dimmed: the chart never
- * presents borrowed data as if the broker had printed it.
+ * The canvas draws price and the engine's price-anchored levels and nothing
+ * else: every narrative row lives in native views outside the plot, so the
+ * analysis can never sit on top of the candles. Level labels are placed in a
+ * dedicated right-hand gutter and pushed apart when they collide, which is
+ * why two levels a few cents apart stay readable.
  */
 class ChartView(context: Context) : View(context) {
 
     private var payload: ChartPayload? = null
     private var persian: Boolean = true
 
+    /** How many bars are in the window; fewer bars means wider, clearer candles. */
+    var visibleBars: Int = DEFAULT_VISIBLE
+        set(value) {
+            field = value.coerceIn(MIN_VISIBLE, MAX_VISIBLE)
+            clampScroll()
+            invalidate()
+        }
+
+    /** Bars hidden to the right of the window; 0 keeps the latest bar visible. */
+    private var scrollBars: Int = 0
+
+    /** Optional analysis card, off by default so it never hides the chart. */
+    var overlayVisible: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var onTap: (() -> Unit)? = null
+
     private val candleUp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = GREEN }
     private val candleDown = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = RED }
-    private val wick = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = dp(1f) }
-    private val seedStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(1f)
-    }
-    private val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = LINE
-        strokeWidth = dp(1f)
-    }
-    private val levelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(1.4f)
-    }
-    private val bandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val axisText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = MUTED
-        textSize = sp(9f)
-        typeface = Typeface.MONOSPACE
-    }
-    private val levelText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = sp(9f)
-        typeface = Typeface.MONOSPACE
-    }
-    private val hudBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#D00B0D10") }
-    private val hudTitle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = ACCENT
-        textSize = sp(11f)
+    private val candleEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val wick = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = GRID }
+    private val gutterBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = PANEL }
+    private val seedWash = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0CFFFFFF") }
+    private val bandFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#144ED38A") }
+    private val levelLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val tagFill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tagText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
     }
-    private val hudText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = TEXT
-        textSize = sp(10f)
+    private val axisText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = MUTED
+        typeface = Typeface.MONOSPACE
     }
-    private val hudMuted = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = MUTED_HI
-        textSize = sp(9f)
+    private val watermark = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = MUTED }
+    private val cardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#E60E1217") }
+    private val cardEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#2A333D")
+        style = Paint.Style.STROKE
     }
+    private val cardText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = TEXT }
+    private val cardHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ACCENT
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private val emptyText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = MUTED }
 
-    private val timeFmt: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneOffset.UTC)
+    private val timeFmtIntraday: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("dd HH:mm").withZone(ZoneOffset.UTC)
+    private val timeFmtDaily: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("MM-dd").withZone(ZoneOffset.UTC)
+
+    private var downX = 0f
+    private var downY = 0f
+    private var dragged = false
+    private var scrollAtDown = 0
+
+    init {
+        setWillNotDraw(false)
+        isClickable = true
+        val d = resources.displayMetrics.density
+        wick.strokeWidth = 1.3f * d
+        candleEdge.strokeWidth = 1.2f * d
+        grid.strokeWidth = 1f * d
+        levelLine.strokeWidth = 1.5f * d
+        cardEdge.strokeWidth = 1f * d
+        axisText.textSize = 10f * d
+        tagText.textSize = 10f * d
+        watermark.textSize = 10f * d
+        cardText.textSize = 11f * d
+        cardHead.textSize = 12f * d
+        emptyText.textSize = 12f * d
+    }
 
     fun bind(payload: ChartPayload?, persian: Boolean) {
+        val symbolChanged = payload?.symbol != this.payload?.symbol ||
+            payload?.timeframe != this.payload?.timeframe
         this.payload = payload
         this.persian = persian
+        if (symbolChanged) scrollBars = 0
+        clampScroll()
         invalidate()
     }
+
+    /* ----------------------------- interaction ----------------------------- */
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val slot = slotWidth()
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                dragged = false
+                scrollAtDown = scrollBars
+                parent?.requestDisallowInterceptTouchEvent(true)
+                return true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.x - downX
+                if (abs(dx) > touchSlop()) {
+                    dragged = true
+                    scrollBars = scrollAtDown + (dx / max(slot, 1f)).roundToInt()
+                    clampScroll()
+                    invalidate()
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_UP -> {
+                parent?.requestDisallowInterceptTouchEvent(false)
+                if (!dragged) {
+                    performClick()
+                    onTap?.invoke()
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                parent?.requestDisallowInterceptTouchEvent(false)
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
+    }
+
+    private fun touchSlop(): Float = 6f * resources.displayMetrics.density
+
+    private fun clampScroll() {
+        val total = payload?.series?.candles?.size ?: 0
+        val maxScroll = max(0, total - visibleBars)
+        scrollBars = scrollBars.coerceIn(0, maxScroll)
+    }
+
+    private fun slotWidth(): Float {
+        val w = width - gutterWidth() - padLeft()
+        return if (visibleBars <= 0) 1f else w / visibleBars
+    }
+
+    private fun gutterWidth(): Float = 58f * resources.displayMetrics.density
+    private fun padLeft(): Float = 4f * resources.displayMetrics.density
+    private fun axisHeight(): Float = 16f * resources.displayMetrics.density
+
+    /* -------------------------------- draw --------------------------------- */
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(BG)
 
         val p = payload
-        if (p == null || p.series.candles.isEmpty()) {
-            val msg = if (persian) "داده‌ای برای رسم وجود ندارد" else "No data to plot"
-            hudText.color = MUTED
-            canvas.drawText(msg, dp(12f), height / 2f, hudText)
-            hudText.color = TEXT
+        val all = p?.series?.candles.orEmpty()
+        if (p == null || all.isEmpty()) {
+            val msg = if (persian) "داده‌ای برای رسم نیست" else "No data to plot"
+            canvas.drawText(msg, 12f * resources.displayMetrics.density, height / 2f, emptyText)
             return
         }
 
-        val padLeft = dp(6f)
-        val padRight = dp(62f)
-        val padTop = dp(8f)
-        val padBottom = dp(18f)
-        val plotW = width - padLeft - padRight
-        val plotH = height - padTop - padBottom
+        val d = resources.displayMetrics.density
+        val gutter = gutterWidth()
+        val left = padLeft()
+        val plotRight = width - gutter
+        val top = 2f * d
+        val plotBottom = height - axisHeight()
+        val plotW = plotRight - left
+        val plotH = plotBottom - top
         if (plotW <= 0 || plotH <= 0) return
 
-        val candles = p.series.candles.takeLast(maxBars(plotW))
-        var lo = candles.minOf { it.low }
-        var hi = candles.maxOf { it.high }
-        // Price-anchored levels must be inside the window, otherwise an
-        // overlay the engine published would silently fall off the chart.
-        p.levels.forEach {
+        clampScroll()
+        val end = all.size - scrollBars
+        val start = max(0, end - visibleBars)
+        val window = all.subList(start, max(start, end))
+        if (window.isEmpty()) return
+
+        var lo = window.minOf { it.low }
+        var hi = window.maxOf { it.high }
+        // A level the engine published must stay inside the window, otherwise
+        // the chart would show a conclusion that is drawn nowhere. A level far
+        // outside the price action is dropped instead, so one distant line
+        // cannot flatten every candle; when the view is panned back in time
+        // even the live price is allowed to fall outside.
+        val span = hi - lo
+        val live = scrollBars == 0
+        val levels = p.levels.filter {
+            it.price >= lo - span && it.price <= hi + span && (live || it.kind != LevelKind.SPOT) ||
+                (live && it.kind == LevelKind.SPOT)
+        }
+        levels.forEach {
             lo = min(lo, it.price)
             hi = max(hi, it.price)
         }
         if (hi - lo < 1e-9) {
-            hi += 1.0
-            lo -= 1.0
+            hi += 1.0; lo -= 1.0
         }
-        val pad = (hi - lo) * 0.06
-        lo -= pad
-        hi += pad
+        val headroom = (hi - lo) * 0.08
+        lo -= headroom
+        hi += headroom
 
-        fun y(price: Double): Float = (padTop + plotH * (hi - price) / (hi - lo)).toFloat()
-        val slot = plotW / candles.size
-        fun x(i: Int): Float = padLeft + slot * (i + 0.5f)
+        fun y(price: Double): Float = (top + plotH * (hi - price) / (hi - lo)).toFloat()
+        val slot = plotW / window.size
+        fun x(i: Int): Float = left + slot * (i + 0.5f)
 
-        drawGrid(canvas, padLeft, padTop, plotW, plotH, lo, hi, ::y)
-        drawBand(canvas, p.levels, padLeft, plotW, ::y)
-        drawCandles(canvas, candles, slot, ::x, ::y)
-        drawLevels(canvas, p.levels, padLeft, plotW, padRight, ::y)
-        drawTimeAxis(canvas, candles, ::x, padTop + plotH)
-        drawHud(canvas, p)
+        // seeded region wash, so borrowed history is visible at a glance
+        val lastSeed = window.indexOfLast { it.origin == BarOrigin.SEED_REBASED }
+        if (lastSeed >= 0) {
+            canvas.drawRect(left, top, left + slot * (lastSeed + 1), plotBottom, seedWash)
+        }
+
+        drawGrid(canvas, left, plotRight, top, plotH, lo, hi, ::y)
+        drawBand(canvas, levels, left, plotRight, ::y)
+        drawCandles(canvas, window, slot, ::x, ::y)
+        drawLevelLines(canvas, levels, left, plotRight, ::y)
+        drawTimeAxis(canvas, window, ::x, plotBottom, p.timeframe.code)
+
+        canvas.drawRect(plotRight, 0f, width.toFloat(), height.toFloat(), gutterBg)
+        drawGutter(canvas, levels, p, plotRight, top, plotH, lo, hi, ::y)
+
+        val head = buildString {
+            append(p.symbol).append("  ").append(p.timeframe.code)
+            append("   ").append(window.size).append("/").append(all.size)
+            if (scrollBars > 0) append("  -").append(scrollBars)
+        }
+        canvas.drawText(head, left + 2f * d, top + 11f * d, watermark)
+
+        if (overlayVisible) drawCard(canvas, p, left, plotRight, plotBottom)
     }
-
-    private fun maxBars(plotW: Float): Int = max(20, (plotW / dp(5f)).toInt())
 
     private fun drawGrid(
-        canvas: Canvas, left: Float, top: Float, w: Float, h: Float,
+        canvas: Canvas, left: Float, right: Float, top: Float, h: Float,
         lo: Double, hi: Double, y: (Double) -> Float
     ) {
-        val steps = 4
-        for (i in 0..steps) {
-            val price = lo + (hi - lo) * i / steps
+        for (i in 0..GRID_LINES) {
+            val price = lo + (hi - lo) * i / GRID_LINES
             val yy = y(price)
-            canvas.drawLine(left, yy, left + w, yy, grid)
-            canvas.drawText("%.2f".format(price), left + w + dp(4f), yy + sp(3f), axisText)
+            canvas.drawLine(left, yy, right, yy, grid)
         }
     }
 
-    /** The expected-move band is a region, not a line, so it is drawn as one. */
-    private fun drawBand(canvas: Canvas, levels: List<PriceLevel>, left: Float, w: Float, y: (Double) -> Float) {
+    private fun drawBand(canvas: Canvas, levels: List<PriceLevel>, left: Float, right: Float, y: (Double) -> Float) {
         val high = levels.firstOrNull { it.kind == LevelKind.BAND_HIGH } ?: return
         val low = levels.firstOrNull { it.kind == LevelKind.BAND_LOW } ?: return
-        bandPaint.color = Color.parseColor("#1A4ED38A")
-        canvas.drawRect(left, y(high.price), left + w, y(low.price), bandPaint)
+        canvas.drawRect(left, y(high.price), right, y(low.price), bandFill)
     }
 
     private fun drawCandles(
-        canvas: Canvas, candles: List<Candle>, slot: Float,
+        canvas: Canvas, window: List<Candle>, slot: Float,
         x: (Int) -> Float, y: (Double) -> Float
     ) {
-        val bodyW = max(dp(1.2f), slot * 0.62f)
-        candles.forEachIndexed { i, c ->
+        val d = resources.displayMetrics.density
+        val bodyW = max(1.5f * d, slot * 0.68f)
+        window.forEachIndexed { i, c ->
             val cx = x(i)
             val up = c.bullish
-            val color = if (up) GREEN else RED
+            val base = if (up) GREEN else RED
             val live = c.origin == BarOrigin.LIVE
-            wick.color = if (live) color else dim(color)
+            val color = if (live) base else dim(base)
+            wick.color = color
             canvas.drawLine(cx, y(c.high), cx, y(c.low), wick)
 
             val top = y(max(c.open, c.close))
-            val bottom = y(min(c.open, c.close))
-            val rect = android.graphics.RectF(
-                cx - bodyW / 2f, top, cx + bodyW / 2f, max(bottom, top + dp(0.8f))
-            )
+            val bottom = max(y(min(c.open, c.close)), top + 1.2f * d)
+            val rect = RectF(cx - bodyW / 2f, top, cx + bodyW / 2f, bottom)
             if (live) {
-                val body = if (up) candleUp else candleDown
-                canvas.drawRect(rect, body)
+                canvas.drawRect(rect, if (up) candleUp else candleDown)
             } else {
-                seedStroke.color = dim(color)
-                canvas.drawRect(rect, seedStroke)
+                candleEdge.color = color
+                canvas.drawRect(rect, candleEdge)
             }
         }
     }
 
-    private fun drawLevels(
-        canvas: Canvas, levels: List<PriceLevel>, left: Float, w: Float,
-        rightPad: Float, y: (Double) -> Float
+    private fun drawLevelLines(
+        canvas: Canvas, levels: List<PriceLevel>, left: Float, right: Float, y: (Double) -> Float
     ) {
+        val d = resources.displayMetrics.density
         levels.forEach { l ->
-            val color = levelColor(l.kind)
-            levelPaint.color = color
-            levelPaint.pathEffect = when (l.kind) {
+            levelLine.color = levelColor(l.kind)
+            levelLine.pathEffect = when (l.kind) {
                 LevelKind.SPOT -> null
-                LevelKind.BID, LevelKind.ASK -> DashPathEffect(floatArrayOf(dp(2f), dp(4f)), 0f)
-                else -> DashPathEffect(floatArrayOf(dp(6f), dp(5f)), 0f)
+                LevelKind.BID, LevelKind.ASK -> DashPathEffect(floatArrayOf(2f * d, 3f * d), 0f)
+                else -> DashPathEffect(floatArrayOf(7f * d, 5f * d), 0f)
             }
-            val yy = y(l.price)
-            canvas.drawLine(left, yy, left + w, yy, levelPaint)
-
-            val label = (if (persian) l.labelFa else l.labelEn) + "  " + "%.2f".format(l.price)
-            levelText.color = color
-            val tw = levelText.measureText(label)
-            val tx = (left + w - tw - dp(4f)).coerceAtLeast(left + dp(2f))
-            canvas.drawText(label, tx, yy - dp(3f), levelText)
-        }
-    }
-
-    private fun drawTimeAxis(canvas: Canvas, candles: List<Candle>, x: (Int) -> Float, baseline: Float) {
-        if (candles.size < 2) return
-        val step = max(1, candles.size / 4)
-        var i = 0
-        while (i < candles.size) {
-            canvas.drawText(timeFmt.format(candles[i].time), x(i) - dp(16f), baseline + sp(11f), axisText)
-            i += step
+            canvas.drawLine(left, y(l.price), right, y(l.price), levelLine)
         }
     }
 
     /**
-     * The heads-up display: the conclusion, what moved since the previous
-     * refresh, both readings when the engine holds two, and any exception.
+     * Price scale plus one tag per published level. Tags are laid out from the
+     * top down and pushed apart on collision, so overlapping levels stay legible.
      */
-    private fun drawHud(canvas: Canvas, p: ChartPayload) {
+    private fun drawGutter(
+        canvas: Canvas, levels: List<PriceLevel>, p: ChartPayload,
+        gutterLeft: Float, top: Float, h: Float, lo: Double, hi: Double, y: (Double) -> Float
+    ) {
+        val d = resources.displayMetrics.density
+        for (i in 0..GRID_LINES) {
+            val price = lo + (hi - lo) * i / GRID_LINES
+            canvas.drawText("%.2f".format(price), gutterLeft + 4f * d, y(price) + 3.5f * d, axisText)
+        }
+
+        data class Tag(val y: Float, val text: String, val color: Int, val strong: Boolean)
+
+        val tags = levels.sortedByDescending { it.price }.map {
+            Tag(y(it.price), shortLabel(it) + " " + "%.2f".format(it.price), levelColor(it.kind), it.kind == LevelKind.SPOT)
+        }
+        val tagH = 13f * d
+        var cursor = top
+        tags.forEach { t ->
+            val ty = max(t.y - tagH / 2f, cursor)
+            cursor = ty + tagH + 1.5f * d
+            val rect = RectF(gutterLeft + 1f * d, ty, width - 1f * d, ty + tagH)
+            tagFill.color = if (t.strong) t.color else Color.argb(
+                46, Color.red(t.color), Color.green(t.color), Color.blue(t.color)
+            )
+            canvas.drawRoundRect(rect, 2f * d, 2f * d, tagFill)
+            tagText.color = if (t.strong) BG else t.color
+            canvas.drawText(t.text, rect.left + 3f * d, rect.bottom - 3.5f * d, tagText)
+        }
+    }
+
+    private fun drawTimeAxis(
+        canvas: Canvas, window: List<Candle>, x: (Int) -> Float, baseline: Float, timeframe: String
+    ) {
+        if (window.size < 2) return
+        val d = resources.displayMetrics.density
+        val fmt = if (timeframe == "1D") timeFmtDaily else timeFmtIntraday
+        val step = max(1, window.size / 5)
+        var i = 0
+        while (i < window.size) {
+            val label = fmt.format(window[i].time)
+            canvas.drawText(label, x(i) - axisText.measureText(label) / 2f, baseline + 12f * d, axisText)
+            i += step
+        }
+    }
+
+    /** Fullscreen-only analysis card; bounded in height and dismissible. */
+    private fun drawCard(canvas: Canvas, p: ChartPayload, left: Float, right: Float, bottom: Float) {
+        val d = resources.displayMetrics.density
         val h = p.headline
         val lines = mutableListOf<Pair<String, Paint>>()
-
         val dir = when (h.direction) {
-            "BULLISH" -> if (persian) "صعودی ▲" else "BULLISH ▲"
-            "BEARISH" -> if (persian) "نزولی ▼" else "BEARISH ▼"
+            "BULLISH" -> (if (persian) "صعودی" else "BULLISH") + " ▲"
+            "BEARISH" -> (if (persian) "نزولی" else "BEARISH") + " ▼"
             else -> h.direction
         }
-        val conf = h.confidence?.let { "%.0f%%".format(it * 100) } ?: "—"
-        val bias = h.bias?.let { "%+.0f".format(it) } ?: "—"
-        lines += "$dir   ${h.horizon}   conf $conf   bias $bias" to hudTitle
-        lines += "${h.regime} · ${h.signalState} · ${h.probabilityStatus}" to hudMuted
-
-        val changed = p.deltas.filter { it.changed }
-        if (changed.isEmpty()) {
-            lines += (if (persian) "بدون تغییر نسبت به اجرای قبلی" else "No change since last refresh") to hudMuted
-        } else {
-            changed.take(4).forEach { d ->
-                val arrow = if (d.direction > 0) "▲" else if (d.direction < 0) "▼" else "•"
-                val label = if (persian) d.labelFa else d.labelEn
-                lines += "$arrow $label: ${d.previous} → ${d.current}" to hudText
-            }
+        lines += "$dir  ${h.horizon}  ${h.confidence?.let { "%.0f%%".format(it * 100) } ?: "—"}  ${h.bias?.let { "%+.0f".format(it) } ?: "—"}" to cardHead
+        lines += "${h.regime} · ${h.signalState}" to cardText
+        p.deltas.filter { it.changed }.take(3).forEach {
+            val arrow = if (it.direction > 0) "▲" else if (it.direction < 0) "▼" else "•"
+            lines += "$arrow ${if (persian) it.labelFa else it.labelEn}: ${it.previous} → ${it.current}" to cardText
+        }
+        p.dual.take(2).forEach {
+            lines += "⇄ ${it.primary.direction} / ${it.secondary.direction}" to cardText
+        }
+        if (p.exceptions.isNotEmpty()) {
+            lines += "! " + p.exceptions.take(2).joinToString(" · ") { it.code } to cardText
         }
 
-        p.dual.forEach { d ->
-            val a = if (persian) d.primary.labelFa else d.primary.labelEn
-            val b = if (persian) d.secondary.labelFa else d.secondary.labelEn
-            lines += "⇄ $a ${d.primary.direction}  |  $b ${d.secondary.direction}" to hudWarn
-        }
-
-        p.exceptions.take(2).forEach { e ->
-            lines += "! ${e.code} · ${e.component}" to hudError
-        }
-
-        if (p.series.seededBars > 0) {
-            val note = if (persian)
-                "کندل توخالی = پیش‌بار بازمقیاس‌شده (${p.series.seededBars})"
-            else "hollow = rebased seed bars (${p.series.seededBars})"
-            lines += note to hudMuted
-        }
-
-        val padding = dp(8f)
-        val lineGap = sp(13f)
-        var maxW = 0f
-        lines.forEach { maxW = max(maxW, it.second.measureText(it.first)) }
-        val boxW = min(width - dp(16f), maxW + padding * 2)
-        val boxH = lines.size * lineGap + padding * 2
-
-        canvas.drawRoundRect(
-            dp(6f), dp(6f), dp(6f) + boxW, dp(6f) + boxH, dp(8f), dp(8f), hudBg
-        )
-        var yy = dp(6f) + padding + sp(9f)
+        var w = 0f
+        lines.forEach { w = max(w, it.second.measureText(it.first)) }
+        val pad = 8f * d
+        val lineH = 15f * d
+        val boxW = min(right - left - 8f * d, w + pad * 2)
+        val boxH = lines.size * lineH + pad * 2
+        val x0 = left + 4f * d
+        val y0 = bottom - boxH - 4f * d
+        val rect = RectF(x0, y0, x0 + boxW, y0 + boxH)
+        canvas.drawRoundRect(rect, 6f * d, 6f * d, cardBg)
+        canvas.drawRoundRect(rect, 6f * d, 6f * d, cardEdge)
+        var ty = y0 + pad + 10f * d
         lines.forEach { (text, paint) ->
-            canvas.drawText(text, dp(6f) + padding, yy, paint)
-            yy += lineGap
+            canvas.drawText(text, x0 + pad, ty, paint)
+            ty += lineH
         }
-
-        val q = p.quote
-        val footer = buildString {
-            append(p.venueLabel)
-            append("  ·  ").append(p.timeframe.code)
-            if (q != null) {
-                append("  ·  ").append("%.3f".format(q.last))
-                q.spreadBp?.let { append("  ·  spread %.1f bp".format(it)) }
-                append("  ·  ").append(q.updateMode ?: "?")
-            }
-        }
-        val fw = hudMuted.measureText(footer)
-        canvas.drawText(footer, max(dp(6f), width - fw - dp(8f)), height - dp(4f), hudMuted)
     }
 
-    private val hudWarn = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = AMBER
-        textSize = sp(10f)
-        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-    }
-    private val hudError = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = RED
-        textSize = sp(10f)
-        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    private fun shortLabel(l: PriceLevel): String = when (l.kind) {
+        LevelKind.SPOT -> "LAST"
+        LevelKind.BID -> "BID"
+        LevelKind.ASK -> "ASK"
+        LevelKind.INVALIDATION -> "INV"
+        LevelKind.EXPECTED_MOVE -> "EXP"
+        LevelKind.BAND_HIGH -> "P95"
+        LevelKind.BAND_LOW -> "P5"
+        LevelKind.BENCHMARK -> "LBMA"
     }
 
     private fun levelColor(kind: LevelKind): Int = when (kind) {
@@ -306,31 +435,28 @@ class ChartView(context: Context) : View(context) {
         LevelKind.ASK -> RED
         LevelKind.INVALIDATION -> RED
         LevelKind.EXPECTED_MOVE -> VIOLET
-        LevelKind.BAND_HIGH, LevelKind.BAND_LOW -> Color.parseColor("#4ED38A")
-        LevelKind.BENCHMARK -> Color.parseColor("#9AA4B2")
+        LevelKind.BAND_HIGH, LevelKind.BAND_LOW -> GREEN
+        LevelKind.BENCHMARK -> MUTED_HI
     }
 
-    private fun dim(color: Int): Int = Color.argb(
-        110, Color.red(color), Color.green(color), Color.blue(color)
-    )
-
-    private fun dp(v: Float): Float = v * resources.displayMetrics.density
-    private fun sp(v: Float): Float = v * resources.displayMetrics.scaledDensity
+    private fun dim(color: Int): Int =
+        Color.argb(120, Color.red(color), Color.green(color), Color.blue(color))
 
     companion object {
+        const val DEFAULT_VISIBLE = 70
+        const val MIN_VISIBLE = 30
+        const val MAX_VISIBLE = 240
+        private const val GRID_LINES = 4
+
         private val BG = Color.parseColor("#0B0D10")
-        private val LINE = Color.parseColor("#1C232B")
+        private val PANEL = Color.parseColor("#101419")
+        private val GRID = Color.parseColor("#1A212A")
         private val TEXT = Color.parseColor("#E6E8EB")
-        private val MUTED = Color.parseColor("#6B7584")
+        private val MUTED = Color.parseColor("#7B8694")
         private val MUTED_HI = Color.parseColor("#9AA4B2")
         private val ACCENT = Color.parseColor("#D6B36A")
         private val GREEN = Color.parseColor("#4ED38A")
         private val RED = Color.parseColor("#F26B6B")
-        private val AMBER = Color.parseColor("#E8B04B")
         private val VIOLET = Color.parseColor("#9B8CF5")
-    }
-
-    init {
-        setWillNotDraw(false)
     }
 }

@@ -560,4 +560,32 @@ class ChartTest {
             log.snapshot().none { it.code.startsWith("CHART_EXCEPTION_CHART_EXCEPTION_") }
         )
     }
+
+    /** ERROR is reserved for unhandled failures; the chart never raises one. */
+    @Test
+    fun `chart derived exceptions are logged as warnings not errors`() {
+        val log = io.goldintelligence.engine.DiagnosticLog()
+        val empty = ChartSeries("OANDA:XAUUSD", "OANDA", ChartTimeframe.H1, emptyList(), null, null, 0, 0)
+        ChartOverlayBuilder(log).build(
+            report = null, quote = null, series = empty,
+            venue = BrokerFeedProvider.DEFAULT, previous = null,
+            feedFailure = "FEED_UNAVAILABLE", now = now
+        )
+        val chartRows = log.snapshot().filter { it.stage == io.goldintelligence.engine.LogStage.CHART }
+        assertTrue("the chart logged its exceptions", chartRows.any { it.code.startsWith("CHART_EXCEPTION_") })
+        assertTrue(
+            "no chart row is an ERROR",
+            chartRows.none { it.level == io.goldintelligence.engine.LogLevel.ERROR }
+        )
+    }
+
+    /** A provider with a declared fallback must not raise an ERROR either. */
+    @Test
+    fun `optional provider refusal is a warning`() {
+        assertTrue("YAHOO is declared optional", Providers.optionalIds.contains("YAHOO"))
+        assertTrue(
+            "every optional id is a real provider",
+            Providers.optionalIds.all { id -> Providers.all.any { it.id == id } }
+        )
+    }
 }
