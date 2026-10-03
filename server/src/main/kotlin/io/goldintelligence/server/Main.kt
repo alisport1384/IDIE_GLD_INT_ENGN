@@ -58,6 +58,9 @@ class IntelligenceServer(
         server.createContext("/v1/chart") { ex -> json(ex, screen(ScreenModel.SCREEN_CHART)) }
         server.createContext("/v1/chart.json") { ex -> json(ex, chartJson()) }
         server.createContext("/v1/logs") { ex -> json(ex, screen(ScreenModel.SCREEN_LOGS)) }
+        // SPEC v2.1 §21.1 — the recorder is off until it is switched on here.
+        server.createContext("/v1/logs/on") { ex -> json(ex, recording(true)) }
+        server.createContext("/v1/logs/off") { ex -> json(ex, recording(false)) }
         server.createContext("/v1/logs.json") { ex -> json(ex, logsJson(ex)) }
         server.createContext("/v1/logs.md") { ex ->
             download(ex, "text/markdown", "gold-intelligence-log.md", DiagnosticLog.shared.toMarkdown(logHeader()))
@@ -146,6 +149,7 @@ class IntelligenceServer(
                     "coverage" to JsonWriter.num(h.coverage),
                     "direction" to JsonWriter.str(h.direction.name),
                     "probability" to JsonWriter.num(h.probability),
+                    "rawProbability" to JsonWriter.num(h.rawProbability),
                     "probabilityStatus" to JsonWriter.str(h.probabilityStatus),
                     "confidence" to JsonWriter.num(h.confidence),
                     "goldBias" to JsonWriter.num(h.goldBias),
@@ -156,11 +160,134 @@ class IntelligenceServer(
                             "point" to JsonWriter.num(it.point),
                             "p5" to JsonWriter.num(it.p5),
                             "p95" to JsonWriter.num(it.p95),
-                            "sigma" to JsonWriter.num(it.sigma)
+                            "sigma" to JsonWriter.num(it.sigma),
+                            "intervalSource" to JsonWriter.str(it.intervalSource),
+                            "halfWidthSigma" to JsonWriter.num(it.halfWidthSigma)
+                        )
+                    } ?: "null"),
+                    // SPEC v2.1 §26.2/§26.3 — the band's measured coverage and
+                    // the mapping's out-of-sample score travel with the number.
+                    "conformal" to (h.conformal?.let {
+                        JsonWriter.obj(
+                            "halfWidthSigma" to JsonWriter.num(it.halfWidth),
+                            "targetCoverage" to JsonWriter.num(it.targetCoverage),
+                            "realisedCoverage" to JsonWriter.num(it.realisedCoverage),
+                            "sampleSize" to JsonWriter.num(it.sampleSize.toDouble())
+                        )
+                    } ?: "null"),
+                    "calibration" to (h.calibrationRecord?.let {
+                        JsonWriter.obj(
+                            "brier" to JsonWriter.num(it.brier),
+                            "reliability" to JsonWriter.num(it.reliability),
+                            "resolution" to JsonWriter.num(it.resolution),
+                            "uncertainty" to JsonWriter.num(it.uncertainty),
+                            "skill" to JsonWriter.num(it.skill),
+                            "baseRate" to JsonWriter.num(it.baseRate),
+                            "sampleSize" to JsonWriter.num(it.sampleSize.toDouble()),
+                            "bins" to JsonWriter.num(it.bins.toDouble())
                         )
                     } ?: "null")
                 )
             },
+            // SPEC v2.1 §26.4–§26.7 — the structural reads behind the above.
+            "inference" to (r.inference?.let { i ->
+                JsonWriter.obj(
+                    "sampleSize" to JsonWriter.num(i.sampleSize.toDouble()),
+                    "calibratedOn" to JsonWriter.arr(i.calibratedOn) { JsonWriter.str(it) },
+                    "measuredOn" to JsonWriter.arr(i.measuredOn) { JsonWriter.str(it) },
+                    "coveredWeight" to JsonWriter.num(i.coveredWeight),
+                    "measuredWeight" to JsonWriter.num(i.measuredWeight),
+                    "liveRidgeProbability" to JsonWriter.num(i.liveRidgeProbability),
+                    "liveVolatilityPct" to JsonWriter.num(i.liveVolatilityPct),
+                    "combination" to JsonWriter.obj(
+                        *i.combination.map { (h, c) ->
+                            h.code to JsonWriter.obj(
+                                "brier" to JsonWriter.num(c.brier.takeIf { it.isFinite() }),
+                                "skill" to JsonWriter.num(c.skill.takeIf { it.isFinite() }),
+                                "sampleSize" to JsonWriter.num(c.sampleSize.toDouble()),
+                                "usedCount" to JsonWriter.num(c.usedCount.toDouble()),
+                                "members" to JsonWriter.arr(c.members) { m ->
+                                    JsonWriter.obj(
+                                        "name" to JsonWriter.str(m.name),
+                                        "brier" to JsonWriter.num(m.brier),
+                                        "skill" to JsonWriter.num(m.skill),
+                                        "weight" to JsonWriter.num(m.weight),
+                                        "used" to JsonWriter.str(m.used.toString())
+                                    )
+                                }
+                            )
+                        }.toTypedArray()
+                    ),
+                    "conditionalBands" to JsonWriter.obj(
+                        *i.mondrian.map { (h, m) ->
+                            h.code to JsonWriter.arr(m.buckets) { b ->
+                                JsonWriter.obj(
+                                    "label" to JsonWriter.str(b.label),
+                                    "halfWidthSigma" to JsonWriter.num(b.band.halfWidth),
+                                    "targetCoverage" to JsonWriter.num(b.band.targetCoverage),
+                                    "realisedCoverage" to JsonWriter.num(b.band.realisedCoverage),
+                                    "sampleSize" to JsonWriter.num(b.band.sampleSize.toDouble())
+                                )
+                            }
+                        }.toTypedArray()
+                    ),
+                    "legInformation" to JsonWriter.obj(
+                        *i.legInformation.map { (h, legs) ->
+                            h.code to JsonWriter.arr(legs) { l ->
+                                JsonWriter.obj(
+                                    "factorId" to JsonWriter.str(l.factorId),
+                                    "rankCorrelation" to JsonWriter.num(l.rankCorrelation),
+                                    "hitRate" to JsonWriter.num(l.hitRate),
+                                    "sampleSize" to JsonWriter.num(l.sampleSize.toDouble()),
+                                    "tStatistic" to JsonWriter.num(l.tStatistic),
+                                    "significant" to JsonWriter.str(l.significant.toString()),
+                                    "informative" to JsonWriter.str(l.informative.toString())
+                                )
+                            }
+                        }.toTypedArray()
+                    ),
+                    "effectiveNumberOfBets" to JsonWriter.num(i.effectiveBreadth),
+                    "breadthRatio" to JsonWriter.num(i.breadthRatio),
+                    "runLength" to (i.runLength?.let { rl ->
+                        JsonWriter.obj(
+                            "map" to JsonWriter.num(rl.mapRunLength.toDouble()),
+                            "changeProbability" to JsonWriter.num(rl.changeProbability),
+                            "youngRegimeProbability" to JsonWriter.num(rl.youngRegimeProbability),
+                            "stability" to JsonWriter.str(rl.stability.name),
+                            "observations" to JsonWriter.num(rl.observations.toDouble())
+                        )
+                    } ?: "null"),
+                    "trend" to (i.trend?.let { t ->
+                        JsonWriter.obj(
+                            "varianceRatio" to JsonWriter.num(t.varianceRatio),
+                            "zStatistic" to JsonWriter.num(t.zStatistic),
+                            "hurst" to JsonWriter.num(t.hurst),
+                            "label" to JsonWriter.str(t.label),
+                            "momentumCredibility" to JsonWriter.num(t.momentumCredibility),
+                            "lag" to JsonWriter.num(t.lag.toDouble()),
+                            "observations" to JsonWriter.num(t.observations.toDouble())
+                        )
+                    } ?: "null"),
+                    "filteredComposite" to (i.filtered?.let { f ->
+                        JsonWriter.obj(
+                            "level" to JsonWriter.num(f.level),
+                            "standardError" to JsonWriter.num(f.standardError),
+                            "gain" to JsonWriter.num(f.gain),
+                            "observations" to JsonWriter.num(f.observations.toDouble())
+                        )
+                    } ?: "null"),
+                    "robustness" to (i.robustness?.let { rb ->
+                        JsonWriter.obj(
+                            "weighted" to JsonWriter.num(rb.weighted),
+                            "trimmed" to JsonWriter.num(rb.trimmed),
+                            "median" to JsonWriter.num(rb.median),
+                            "fragility" to JsonWriter.num(rb.fragility),
+                            "fragile" to JsonWriter.str(rb.fragile.toString()),
+                            "contributors" to JsonWriter.num(rb.contributors.toDouble())
+                        )
+                    } ?: "null")
+                )
+            } ?: "null"),
             "features" to JsonWriter.obj(
                 *r.features.map { (k, v) -> k to JsonWriter.num(v) }.toTypedArray()
             )
@@ -175,6 +302,7 @@ class IntelligenceServer(
                 "/v1/health", "/v1/screens", "/v1/state", "/v1/factors", "/v1/indicators",
                 "/v1/horizons", "/v1/events", "/v1/diagnostics", "/v1/report", "/v1/stream",
                 "/v1/logs", "/v1/logs.json", "/v1/logs.md", "/v1/logs.txt",
+                "/v1/logs/on", "/v1/logs/off",
                 "/v1/chart", "/v1/chart.json"
             )
         ) { JsonWriter.str(it) }
@@ -294,6 +422,19 @@ class IntelligenceServer(
      * Structured log as JSON. `?level=WARN&stage=NETWORK&q=treasury&limit=500`
      * narrow the result; defaults return the whole ring.
      */
+    private fun recording(on: Boolean): String {
+        DiagnosticLog.shared.setRecording(on)
+        return JsonWriter.obj(
+            "recording" to JsonWriter.bool(DiagnosticLog.shared.isRecording()),
+            "records" to JsonWriter.num(DiagnosticLog.shared.snapshot().size.toDouble()),
+            "notTaken" to JsonWriter.num(DiagnosticLog.shared.suppressedCount().toDouble()),
+            "note" to JsonWriter.str(
+                if (on) "recording from now on; nothing before this moment exists"
+                else "recording stopped; captured records remain readable until cleared"
+            )
+        )
+    }
+
     private fun logsJson(ex: HttpExchange): String {
         val q = (ex.requestURI.query ?: "").split('&')
             .mapNotNull { it.split('=', limit = 2).takeIf { p -> p.size == 2 } }
@@ -406,6 +547,12 @@ fun main(args: Array<String>) {
     val port = args.firstOrNull()?.toIntOrNull()
         ?: System.getenv("PORT")?.toIntOrNull()
         ?: 8080
+    // SPEC v2.1 §21.1 — off by default; GI_LOG=1 starts a session already
+    // recording, for the case where the very first refresh is the one in
+    // question and there is no chance to call /v1/logs/on in time.
+    if (System.getenv("GI_LOG")?.lowercase() in setOf("1", "true", "on", "yes")) {
+        DiagnosticLog.shared.setRecording(true)
+    }
     IntelligenceServer(port = port).start()
     Thread.currentThread().join()
 }

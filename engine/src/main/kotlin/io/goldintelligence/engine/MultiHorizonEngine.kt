@@ -24,7 +24,13 @@ data class MarketContext(
     val brierDriftRatio: Double? = null,
     /** Fraction of the calibration sample requirement met, 0..1; 0 ⇒ uncalibrated. */
     val calibrationQuality: Double? = null,
-    val spotPrice: Double? = null
+    val spotPrice: Double? = null,
+    /**
+     * SPEC v2.1 §26 — the walk-forward record and the structural reads built
+     * from it. Absent ⇒ the engine behaves exactly as it did before §26:
+     * uncalibrated, Gaussian bands, agreement uncorrected.
+     */
+    val inference: InferenceBundle? = null
 )
 
 /** Per-horizon result (SPEC v2 §D1 and §18 screen 4). */
@@ -47,7 +53,16 @@ data class HorizonState(
     val conflictRatio: Double,
     val killSwitch: KillSwitchResult,
     val signalState: SignalState,
-    val uncertainty: Uncertainty
+    val uncertainty: Uncertainty,
+    /**
+     * SPEC v2.1 §26. The uncalibrated logistic of the bias, kept beside
+     * [probability] so the size of the calibration correction is visible.
+     */
+    val rawProbability: Double? = null,
+    /** Out-of-sample score of the mapping that produced [probability]. */
+    val calibrationRecord: BrierReport? = null,
+    /** Conformal half-width behind [expectedMove], in sigma. */
+    val conformal: ConformalBand? = null
 )
 
 /** Full report consumed by the API layer and by the app's six screens. */
@@ -61,7 +76,9 @@ data class IntelligenceReport(
     val factorScores: List<FactorScore>,
     val features: Map<String, Double>,
     val dataQuality: Double,
-    val spotPrice: Double?
+    val spotPrice: Double?,
+    /** SPEC v2.1 §26 — the inference layer's output for this cycle. */
+    val inference: InferenceBundle? = null
 )
 
 /**
@@ -115,7 +132,8 @@ class MultiHorizonEngine(
             factorScores = scores,
             features = input.features.values,
             dataQuality = dataQuality,
-            spotPrice = context.spotPrice
+            spotPrice = context.spotPrice,
+            inference = context.inference
         )
     }
 
@@ -179,6 +197,17 @@ class MultiHorizonEngine(
         val attribution = attributionEngine.attribute(weighted, interaction)
 
         val horizonQuality = DataQuality.aggregate(active.map { it.quality })
+
+        // SPEC v2.1 §26. Every read below degrades to the pre-§26 behaviour
+        // when the inference layer produced nothing for this horizon.
+        val inference = context.inference
+        val fit = inference?.calibration?.get(horizon)
+        val record = inference?.brier?.get(horizon)
+        // SPEC v2.1 §27 — the volatility-conditional band when the replay
+        // could support one, the pooled band otherwise.
+        val band = inference?.bandFor(horizon)
+        val runLength = inference?.runLength
+
         val kill = KillSwitch.evaluate(
             dataQuality = horizonQuality,
             regime = state.regime,
@@ -194,7 +223,30 @@ class MultiHorizonEngine(
         }
 
         val rawProbability = logistic(goldBias)
-        val calibrationQuality = context.calibrationQuality
+
+        // The published probability is the empirically observed frequency for
+        // this score, not the logistic link, whenever a walk-forward mapping
+        // exists for the horizon.
+        // SPEC v2.1 §27 — the published probability is the combination the
+        // replay scored, not a single model. The isotonic map reads the
+        // normative composite; the panel model reads the factor panel; the
+        // weights are the ones measured out of sample, and a member with no
+        // positive skill carries none of them.
+        val isotonicProbability = fit?.probability(goldBias)
+        val combination = inference?.combination?.get(horizon)
+        val calibratedProbability = when {
+            combination == null -> isotonicProbability
+            else -> {
+                val weights = combination.members.filter { it.used }.associate { it.name to it.weight }
+                val live = buildMap {
+                    isotonicProbability?.let { put(MEMBER_ISOTONIC, it) }
+                    inference.liveRidgeProbability?.let { put(MEMBER_RIDGE, it) }
+                }
+                ForecastCombination.pool(weights, live) ?: isotonicProbability
+            }
+        }
+        val calibrationQuality = inference?.qualityFor(horizon)?.takeIf { it > 0.0 }
+            ?: context.calibrationQuality
         val publishable = gate.mode == HorizonMode.CALIBRATED &&
             !kill.engaged &&
             calibrationQuality != null &&
@@ -203,20 +255,40 @@ class MultiHorizonEngine(
         val probabilityStatus = when {
             kill.engaged -> "SUPPRESSED_KILL_SWITCH"
             gate.mode == HorizonMode.DIRECTIONAL_ONLY -> "DIRECTIONAL_ONLY/UNCALIBRATED"
+            // Measured and found worthless is a different answer from never
+            // measured, and the screen is told which one it is.
+            (calibrationQuality == null || calibrationQuality <= 0.0) &&
+                inference?.measured(horizon) == true -> "UNCALIBRATED_NO_SKILL"
             calibrationQuality == null || calibrationQuality <= 0.0 -> "UNCALIBRATED_NO_SAMPLE"
+            calibratedProbability != null -> "CALIBRATED_WALK_FORWARD"
             else -> "CALIBRATED"
         }
-        val probability = if (publishable) rawProbability else null
+        val effectiveProbability = calibratedProbability ?: rawProbability
+        val probability = if (publishable) effectiveProbability else null
+
+        // §26. Agreement between factors that move together is one witness,
+        // not many: the majority share is shrunk toward neutral in proportion
+        // to how little of the evidence is independent (Meucci 2009).
+        val agreement = modelAgreement(weighted)
+        val correctedAgreement = inference?.breadthRatio
+            ?.let { 0.5 + (agreement - 0.5) * it.coerceIn(0.0, 1.0) }
+            ?: agreement
+
+        // §26. The regime label is replaced by the posterior age of the run
+        // when the changepoint detector has an opinion (Adams & MacKay 2007).
+        val stability = runLength?.stability ?: state.regimeStability
+        val transition = state.regime == Regime.REGIME_TRANSITION ||
+            (runLength != null && runLength.changeProbability >= CHANGEPOINT_TRANSITION)
 
         val confidence = confidenceEngine.evaluate(
             ConfidenceInputs(
                 dataQuality = horizonQuality,
                 crossMarketConfirmation = cmc.value,
-                modelAgreement = modelAgreement(weighted),
-                regimeStability = state.regimeStability,
+                modelAgreement = correctedAgreement,
+                regimeStability = stability,
                 calibrationQuality = calibrationQuality,
                 conflictRatio = conflictRatio,
-                regimeTransition = state.regime == Regime.REGIME_TRANSITION,
+                regimeTransition = transition,
                 coverage = gate.coverage
             )
         )
@@ -224,7 +296,13 @@ class MultiHorizonEngine(
         val expectedMove = if (kill.engaged) {
             null
         } else {
-            ExpectedMoveEngine.compute(horizon, context.sigmaByHorizon[horizon], rawProbability)
+            ExpectedMoveEngine.compute(
+                horizon = horizon,
+                sigma = context.sigmaByHorizon[horizon],
+                probability = effectiveProbability,
+                conformalHalfWidth = band?.halfWidth,
+                momentumCredibility = inference?.trend?.momentumCredibility
+            )
         }
 
         val uncertainty = when {
@@ -259,7 +337,10 @@ class MultiHorizonEngine(
             conflictRatio = conflictRatio,
             killSwitch = kill,
             signalState = signalState,
-            uncertainty = uncertainty
+            uncertainty = uncertainty,
+            rawProbability = rawProbability,
+            calibrationRecord = record,
+            conformal = band
         )
     }
 
@@ -279,5 +360,15 @@ class MultiHorizonEngine(
 
     companion object {
         const val SPEC_VERSION = "SPEC_GOLD_INTELLIGENCE_V2.1"
+
+        /**
+         * Posterior mass on "the regime reset at this observation" above which
+         * the transition penalty applies (SPEC v2.1 §26.4).
+         */
+        const val CHANGEPOINT_TRANSITION = 0.20
+
+        /** Member names the replay publishes; the engine pools by these. */
+        const val MEMBER_ISOTONIC = "ISOTONIC_COMPOSITE"
+        const val MEMBER_RIDGE = "RIDGE_PANEL"
     }
 }

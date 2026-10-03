@@ -1,21 +1,27 @@
 package io.goldintelligence.client
 
 import io.goldintelligence.engine.CrossMarketConfirmation
+import io.goldintelligence.engine.ChangepointDetector
 import io.goldintelligence.engine.Direction
 import io.goldintelligence.engine.FactorCatalog
 import io.goldintelligence.engine.HorizonMode
 import io.goldintelligence.engine.IntelligenceReport
 import io.goldintelligence.engine.Tier
 import io.goldintelligence.engine.DiagnosticLog
+import io.goldintelligence.engine.ExpectedMoveEngine
 import io.goldintelligence.engine.FeatureKeys
 import io.goldintelligence.engine.LogEntry
 import io.goldintelligence.engine.LogLevel
+import io.goldintelligence.engine.RobustAggregate
+import io.goldintelligence.engine.Stability
 import io.goldintelligence.ingestion.FactorDiagnostic
 import io.goldintelligence.ingestion.FeatureBundle
 import io.goldintelligence.ingestion.IndicatorCatalog
 import io.goldintelligence.ingestion.LicenseClass
 import io.goldintelligence.ingestion.MarketUniverse
+import io.goldintelligence.ingestion.SeriesAnalogueEngine
 import io.goldintelligence.ingestion.SpecFeatureEngineer
+import io.goldintelligence.ingestion.WalkForwardCalibration
 import java.time.Duration
 import java.time.Instant
 import java.util.Locale
@@ -212,16 +218,60 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
                             if (fv.isProxy) add(Badge("PROXY", BadgeKind.PROXY))
                             add(Badge("T${tierLabel(fv.tier)}", BadgeKind.INFO))
                             add(Badge("q ${pct(fv.quality)}", if (fv.quality >= 0.75) BadgeKind.OK else BadgeKind.WARN))
-                            stalenessBadge(fv.asOf, Duration.ofDays(1), now)?.let { add(it) }
+                            stalenessBadge(fv.asOf, publicationCadence(ind.key), now)?.let { add(it) }
+                            // SPEC v2.1 §27 — the standing provenance of the
+                            // input, beside the per-observation quality.
+                            when (IndicatorCatalog.provenanceOf(ind.key)) {
+                                IndicatorCatalog.Provenance.MEASURED -> add(Badge("MEASURED", BadgeKind.OK))
+                                IndicatorCatalog.Provenance.DERIVED -> add(Badge("DERIVED", BadgeKind.INFO))
+                                IndicatorCatalog.Provenance.PROXY -> add(Badge("STAND-IN", BadgeKind.PROXY))
+                            }
                         },
                         noteFa = fv.note ?: fv.source,
-                        noteEn = fv.note ?: fv.source
+                        noteEn = IndicatorCatalog.audit[ind.key]?.note ?: fv.note ?: fv.source
                     )
                 }
             }
             Section("${meta.id} · ${meta.nameFa}", "${meta.id} · ${meta.nameEn}", rows)
         }
-        return Screen(ScreenModel.SCREEN_INDICATORS, "شاخص‌ها", "Indicators", sections)
+        // SPEC v2.1 §27 — the provenance audit, stated once at the top so the
+        // count is readable without scrolling every factor.
+        val counts = IndicatorCatalog.provenanceCounts()
+        val measured = counts[IndicatorCatalog.Provenance.MEASURED] ?: 0
+        val derived = counts[IndicatorCatalog.Provenance.DERIVED] ?: 0
+        val proxy = counts[IndicatorCatalog.Provenance.PROXY] ?: 0
+        val auditSection = Section(
+            "اصالت داده", "Data provenance",
+            listOf(
+                Row(
+                    "طبقه‌بندی شاخص‌ها", "Indicator classification",
+                    "$measured measured  ·  $derived derived  ·  $proxy stand-in",
+                    badges = listOf(
+                        Badge("MEASURED $measured", BadgeKind.OK),
+                        Badge("DERIVED $derived", BadgeKind.INFO),
+                        Badge("STAND-IN $proxy", if (proxy == 0) BadgeKind.OK else BadgeKind.PROXY)
+                    ),
+                    noteEn = "MEASURED is the published series itself, from its publisher. " +
+                        "DERIVED is arithmetic on measured series only — a spread, a ratio, a " +
+                        "z-score — with the formula stated on the row. STAND-IN is a declared " +
+                        "substitute for something no free source publishes; each one names what " +
+                        "it replaces and why. No indicator is estimated, modelled or filled in.",
+                    noteFa = "اندازه‌گیری‌شده، مشتق‌شده، و جایگزین اعلام‌شده — هیچ عددی تخمین زده نمی‌شود",
+                    emphasis = true
+                )
+            ) + IndicatorCatalog.audit.values
+                .filter { it.provenance == IndicatorCatalog.Provenance.PROXY }
+                .map { a ->
+                    Row(
+                        IndicatorCatalog.byKey[a.key]?.labelFa ?: a.key,
+                        IndicatorCatalog.byKey[a.key]?.labelEn ?: a.key,
+                        "STAND-IN · ${a.source}",
+                        badges = listOf(Badge("STAND-IN", BadgeKind.PROXY)),
+                        noteEn = a.note
+                    )
+                }
+        )
+        return Screen(ScreenModel.SCREEN_INDICATORS, "شاخص‌ها", "Indicators", listOf(auditSection) + sections)
     }
 
     /* ---------------- Screen 4 — HORIZONS ---------------- */
@@ -260,7 +310,16 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
             Row(
                 "${h.horizon.code} — حرکت مورد انتظار", "${h.horizon.code} — expected move",
                 h.expectedMove?.let { "${fmt(it.point, 2)}  (${fmt(it.p5, 2)} … ${fmt(it.p95, 2)})" } ?: NA,
-                noteEn = h.expectedMove?.let { "σ = ${fmt(it.sigma, 3)}" }
+                badges = h.expectedMove?.let { listOf(Badge(it.intervalSource, if (it.intervalSource == ExpectedMoveEngine.CONFORMAL) BadgeKind.OK else BadgeKind.INFO)) } ?: emptyList(),
+                noteEn = h.expectedMove?.let { m ->
+                    "σ = ${fmt(m.sigma, 3)} · half-width ${fmt(m.halfWidthSigma, 3)}σ" +
+                        if (m.intervalSource == ExpectedMoveEngine.CONFORMAL) {
+                            h.conformal?.let {
+                                " · split conformal at ${pct(it.targetCoverage)} nominal, " +
+                                    "${it.realisedCoverage?.let { c -> pct(c) } ?: NA} realised on ${it.sampleSize} held-out sessions"
+                            } ?: ""
+                        } else " · assumed normal quantile; no conformal sample for this horizon"
+                }
             )
         }
 
@@ -269,9 +328,153 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
             listOf(
                 Section("شش افق الزامی", "Six Required Horizons", rows),
                 Section("پوشش شواهد", "Evidence Coverage", detail),
-                Section("حرکت مورد انتظار", "Expected Move", moves)
+                Section("حرکت مورد انتظار", "Expected Move", moves),
+                Section("سابقه کالیبراسیون", "Calibration Record", calibrationRows(report))
             )
         )
+    }
+
+    /**
+     * SPEC v2.1 §26.3 — what the published probability is worth, per horizon.
+     *
+     * The Murphy decomposition is reported in full because the two halves say
+     * different things: reliability is the part a recalibration can remove,
+     * resolution is the part that is genuine information. A row only exists
+     * for a horizon the walk-forward replay could actually score.
+     */
+    private fun calibrationRows(report: IntelligenceReport): List<Row> {
+        val inference = report.inference
+            ?: return listOf(
+                Row(
+                    "سابقه کالیبراسیون", "Calibration record", "NO_SAMPLE",
+                    badges = listOf(Badge("UNCALIBRATED", BadgeKind.WARN)),
+                    noteEn = "The walk-forward replay produced no record this cycle; " +
+                        "every probability is withheld rather than assumed."
+                )
+            )
+
+        val rows = ArrayList<Row>()
+        val standIns = inference.calibratedOn - inference.measuredOn.toSet()
+        rows += Row(
+            "پایه کالیبراسیون", "Calibration basis",
+            "${inference.calibratedOn.size} legs · " +
+                fmt(inference.coveredWeight, 3) + " of normative weight · " +
+                fmt(inference.measuredWeight, 3) + " measured",
+            badges = listOf(
+                Badge("WALK_FORWARD", BadgeKind.OK),
+                if (standIns.isEmpty()) Badge("ALL_MEASURED", BadgeKind.OK)
+                else Badge("${standIns.size} STAND-IN", BadgeKind.PROXY)
+            ),
+            noteEn = "Replayed on the published series for " +
+                inference.measuredOn.joinToString(", ") +
+                (if (standIns.isEmpty()) ""
+                else "; stand-ins were used for " + standIns.joinToString(", ")) +
+                ". The remaining factors have no free daily history and are not in the sample; " +
+                "the mapping is fitted on a composite built on the same scale from a subset of the live inputs.",
+            noteFa = "بازپخش روی جایگزین‌های قیمتی عوامل، نه کل بیست‌ودو عامل"
+        )
+
+        for (h in report.horizons) {
+            val record = h.calibrationRecord ?: continue
+            val fit = inference.calibration[h.horizon]
+            rows += Row(
+                "${h.horizon.code} — امتیاز برایر", "${h.horizon.code} — Brier score",
+                "${fmt(record.brier, 4)}  |  skill ${fmt(record.skill, 4)}",
+                badges = listOf(
+                    Badge(
+                        if (record.skill > 0.0) "SKILL_POSITIVE" else "NO_SKILL",
+                        if (record.skill > 0.0) BadgeKind.OK else BadgeKind.WARN
+                    ),
+                    Badge("N=${record.sampleSize}", BadgeKind.INFO)
+                ),
+                noteEn = "Murphy decomposition: reliability ${fmt(record.reliability, 4)} " +
+                    "− resolution ${fmt(record.resolution, 4)} " +
+                    "+ uncertainty ${fmt(record.uncertainty, 4)} · " +
+                    "base rate ${pct(record.baseRate)} over ${record.bins} quantile bins · " +
+                    "fitted on ${fit?.sampleSize ?: 0} earlier sessions, scored out of sample.",
+                noteFa = "تجزیه مورفی: اعتمادپذیری، تفکیک‌پذیری و عدم‌قطعیت ذاتی"
+            )
+            val raw = h.rawProbability
+            val published = h.probability
+            if (raw != null && published != null) {
+                rows += Row(
+                    "${h.horizon.code} — تصحیح کالیبراسیون", "${h.horizon.code} — calibration correction",
+                    "${pct(raw)} → ${pct(published)}",
+                    noteEn = "Logistic link against the isotonic map measured on held-out history; " +
+                        "the published figure is the observed frequency for this score, not the curve."
+                )
+            }
+        }
+        // SPEC v2.1 §27 — which forecasters were scored, and what each earned.
+        for ((horizon, c) in inference.combination) {
+            rows += Row(
+                "${horizon.code} — ترکیب پیش‌بین‌ها", "${horizon.code} — forecaster combination",
+                c.members.joinToString("  |  ") { "${it.name} ${fmt(it.skill, 4)}" },
+                badges = listOf(
+                    if (c.usedCount > 0) Badge("${c.usedCount} USED", BadgeKind.OK)
+                    else Badge("NONE_ADMITTED", BadgeKind.WARN),
+                    Badge("N=${c.sampleSize}", BadgeKind.INFO)
+                ),
+                noteEn = "Each member's out-of-sample Brier skill. A member enters the published " +
+                    "probability only on positive skill, pooled in log-odds with weights " +
+                    "proportional to that skill (Bates & Granger 1969). " +
+                    (if (c.usedCount == 0)
+                        "None cleared the bar this cycle, so the probability stays withheld."
+                    else "Weights: " + c.members.filter { it.used }
+                        .joinToString(", ") { "${it.name} ${fmt(it.weight, 2)}" }) +
+                    " ISOTONIC_COMPOSITE reads the normative weighted composite; RIDGE_PANEL is a " +
+                    "ridge logistic on the whole standardised panel and does not alter the weight table.",
+                noteFa = "مهارت بیرون‌نمونهٔ هر پیش‌بین؛ تنها مهارت مثبت وارد ترکیب می‌شود"
+            )
+        }
+
+        // SPEC v2.1 §27 — the volatility-conditional bands.
+        for ((horizon, m) in inference.mondrian) {
+            if (m.buckets.isEmpty()) continue
+            rows += Row(
+                "${horizon.code} — باند شرطی", "${horizon.code} — conditional band",
+                m.buckets.joinToString("  |  ") { "${it.label} ±${fmt(it.band.halfWidth, 2)}σ" },
+                badges = listOf(Badge("MONDRIAN", BadgeKind.OK)),
+                noteEn = "Split conformal conditioned on the trailing-volatility tercile " +
+                    "(Vovk et al. 2005). Realised coverage per bucket: " +
+                    m.buckets.joinToString(", ") {
+                        "${it.label} ${pct(it.band.realisedCoverage ?: 0.0)} on ${it.band.sampleSize}"
+                    } +
+                    ". The pooled band is right on average and wrong in both tails; this one is not.",
+                noteFa = "باند کانفورمال مشروط بر دهک نوسان، با پوشش محقق‌شدهٔ هر سطل"
+            )
+        }
+
+        // SPEC v2.1 §27 — which leg actually carried information.
+        for ((horizon, legs) in inference.legInformation) {
+            val top = legs.take(5)
+            if (top.isEmpty()) continue
+            rows += Row(
+                "${horizon.code} — ضریب اطلاعات", "${horizon.code} — information coefficient",
+                top.joinToString("  |  ") { "${it.factorId.take(3)} ${fmt(it.rankCorrelation, 3)}" },
+                badges = listOf(
+                    Badge("${legs.count { it.significant }}/${legs.size} SIGNIFICANT", BadgeKind.INFO)
+                ),
+                noteEn = "Spearman rank correlation between each leg's score and the forward " +
+                    "return it was meant to anticipate, over ${legs.firstOrNull()?.sampleSize ?: 0} " +
+                    "held-out sessions. " + top.joinToString("; ") {
+                        "${it.factorId} IC ${fmt(it.rankCorrelation, 4)}, t ${fmt(it.tStatistic, 2)}, " +
+                            "hit rate ${pct(it.hitRate)}"
+                    } +
+                    ". An IC distinguishable from zero is still far too small to move a Brier score; " +
+                    "both facts are reported.",
+                noteFa = "همبستگی رتبه‌ای هر پایه با بازده آتی، روی داده‌های بیرون‌نمونه"
+            )
+        }
+
+        if (rows.size == 1) {
+            rows += Row(
+                "افق‌های کالیبره", "Calibrated horizons", "NONE",
+                badges = listOf(Badge("UNCALIBRATED", BadgeKind.WARN)),
+                noteEn = "No horizon met the out-of-sample sample-size requirement this cycle."
+            )
+        }
+        return rows
     }
 
     /* ---------------- Screen 5 — EVENTS & NEWS ---------------- */
@@ -283,15 +486,45 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
         now: Instant
     ): Screen {
         val s = report.state
+        val scheduled = calendar.filter { it.time.isAfter(now) }
+        val nextHigh = scheduled.filter { it.highImpact }.minByOrNull { it.time }
+        val nextAny = scheduled.minByOrNull { it.time }
         val newsRows = listOf(
             Row("وضعیت اخبار", "News State", s.newsState),
             Row(
                 "تقویم اقتصادی", "Economic Calendar",
-                if (calendar.isEmpty()) NA else "${calendar.size} رویداد / events",
+                if (calendar.isEmpty()) NA else "${scheduled.size} رویداد پیش‌رو / scheduled",
                 badges = if (calendar.isEmpty()) listOf(Badge("UNAVAILABLE", BadgeKind.ERROR))
                 else listOf(Badge("LIVE", BadgeKind.OK)),
-                noteFa = "تقویم با پیش‌بینی اجماع",
-                noteEn = "Scheduled releases with surveyed consensus forecasts."
+                noteFa = "تقویم با پیش‌بینی اجماع و رقم منتشرشده",
+                noteEn = "Scheduled releases carrying both the published consensus and the released actual."
+            ),
+            // SPEC v2.1 §23 — the event clock, which the horizon layer reads.
+            Row(
+                "تا رویداد پرتأثیر بعدی", "Hours to next high-impact event",
+                nextHigh?.let {
+                    String.format(Locale.US, "%.1f h", Duration.between(now, it.time).toMinutes() / 60.0)
+                } ?: NA,
+                badges = buildList {
+                    if (nextHigh != null) {
+                        val h = Duration.between(now, nextHigh.time).toHours()
+                        add(Badge(if (h <= 24) "WITHIN 24H" else "AHEAD",
+                            if (h <= 24) BadgeKind.WARN else BadgeKind.OK))
+                    } else add(Badge("NONE SCHEDULED", BadgeKind.INFO))
+                },
+                noteFa = nextHigh?.let { "${it.country} — ${it.title}" },
+                noteEn = nextHigh?.let { "${it.country} — ${it.title}" }
+                    ?: "No high-impact release is scheduled in the calendar window.",
+                emphasis = nextHigh != null &&
+                    Duration.between(now, nextHigh.time).toHours() <= 24
+            ),
+            Row(
+                "رویداد بعدی (هر درجه)", "Next scheduled release",
+                nextAny?.let {
+                    String.format(Locale.US, "%.1f h", Duration.between(now, it.time).toMinutes() / 60.0)
+                } ?: NA,
+                noteFa = nextAny?.let { "${it.country} — ${it.title}" },
+                noteEn = nextAny?.let { "${it.country} — ${it.title}" }
             ),
             Row(
                 "جریان اخبار", "News Feed", NA,
@@ -302,16 +535,14 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
         )
 
         // SPEC v2.1 — the calendar is a real feed now, so it gets its own section.
-        val upcoming = calendar.filter { it.time.isAfter(now.minus(Duration.ofHours(6))) }
-            .sortedBy { it.time }
-            .take(24)
+        val upcoming = scheduled.sortedBy { it.time }.take(24)
         val calendarRows = upcoming.map { e ->
             val hours = Duration.between(now, e.time).toMinutes() / 60.0
             Row(
                 labelFa = e.title,
                 labelEn = "${e.country}  ${e.title}",
                 value = buildString {
-                    append(if (hours < 0) "now" else String.format(Locale.US, "T−%.1fh", hours))
+                    append(if (hours < 0.05) "now" else String.format(Locale.US, "T−%.1fh", hours))
                     if (e.forecast != null) append("  |  cons ").append(e.forecast)
                     if (e.previous != null) append("  |  prev ").append(e.previous)
                 },
@@ -328,7 +559,7 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
                     )
                     if (e.forecast != null) add(Badge("CONSENSUS", BadgeKind.OK))
                 },
-                noteEn = "ForexFactory consensus survey",
+                noteEn = "Published consensus for the scheduled release",
                 emphasis = e.highImpact
             )
         }.ifEmpty {
@@ -350,14 +581,78 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
             Row(it.type.name, it.type.name, it.description)
         }.ifEmpty { listOf(Row("واگرایی ثبت نشد", "No divergence recorded", "—")) }
 
-        val analogues = listOf(
-            Row(
-                "آنالوگ تاریخی", "Historical Analogue", "NOT_AVAILABLE",
-                badges = listOf(Badge("NOT_AVAILABLE", BadgeKind.ERROR)),
-                noteFa = "مجموعه‌داده تاریخی برچسب‌خورده وجود ندارد",
-                noteEn = "No labelled historical episode dataset exists; the layer reports its absence instead of guessing."
+        // SPEC v2.1 §24 — matches drawn from the downloaded history itself.
+        // The row reports the date, how close it is and what gold did next;
+        // nothing is labelled and nothing is extrapolated.
+        val matches = report.state.scenarios
+        val analogues = if (matches.isEmpty()) {
+            listOf(
+                Row(
+                    "آنالوگ تاریخی", "Historical Analogue", "NOT_AVAILABLE",
+                    badges = listOf(Badge("NOT_AVAILABLE", BadgeKind.WARN)),
+                    noteFa = "تاریخچهٔ کافی برای تطبیق در این چرخه بارگیری نشد",
+                    noteEn = "Not enough history was loaded this cycle to match against; " +
+                        "the matcher reports its absence instead of guessing."
+                )
             )
-        )
+        } else {
+            val up = matches.count { it.expectedDirection == Direction.BULLISH }
+            val down = matches.count { it.expectedDirection == Direction.BEARISH }
+            val moves = matches.mapNotNull { it.expectedMagnitude }.sorted()
+            val median = if (moves.isEmpty()) null else
+                if (moves.size % 2 == 1) moves[moves.size / 2]
+                else (moves[moves.size / 2 - 1] + moves[moves.size / 2]) / 2.0
+            buildList {
+                add(
+                    Row(
+                        "جمع‌بندی تطبیق", "Match summary",
+                        String.format(
+                            Locale.US, "%d matches · %d up / %d down · median %s",
+                            matches.size, up, down,
+                            median?.let { String.format(Locale.US, "%+.2f%%", it) } ?: NA
+                        ),
+                        badges = listOf(
+                            Badge("${SeriesAnalogueEngine.FORWARD_DAYS}D FORWARD", BadgeKind.INFO),
+                            Badge(
+                                when {
+                                    up > down -> "LEANS UP"
+                                    down > up -> "LEANS DOWN"
+                                    else -> "SPLIT"
+                                },
+                                when {
+                                    up > down -> BadgeKind.OK
+                                    down > up -> BadgeKind.WARN
+                                    else -> BadgeKind.INFO
+                                }
+                            )
+                        ),
+                        noteFa = "نزدیک‌ترین روزهای تاریخی به شرایط امروز، و بازده واقعی طلا پس از آن‌ها",
+                        noteEn = "Closest historical sessions to today's conditions, with the gold " +
+                            "return actually realised over the " +
+                            "${SeriesAnalogueEngine.FORWARD_DAYS} sessions that followed each.",
+                        emphasis = true
+                    )
+                )
+                matches.forEach { m ->
+                    add(
+                        Row(
+                            m.name, m.name,
+                            m.expectedMagnitude?.let { String.format(Locale.US, "%+.2f%%", it) } ?: NA,
+                            badges = listOf(
+                                Badge(directionLabel(m.expectedDirection), badgeForDirection(m.expectedDirection)),
+                                Badge(
+                                    m.probability?.let { String.format(Locale.US, "SIM %.0f%%", it * 100.0) }
+                                        ?: "SIM —",
+                                    BadgeKind.INFO
+                                )
+                            ),
+                            noteFa = m.trigger,
+                            noteEn = m.trigger
+                        )
+                    )
+                }
+            }
+        }
 
         return Screen(
             ScreenModel.SCREEN_EVENTS, "رویدادها و اخبار", "Events & News",
@@ -437,19 +732,23 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
             resolution(
                 "عمق دفتر سفارش طلا", "Gold order book depth",
                 books.isNotEmpty(),
-                "Full L2 depth from Kraken PAXG/USD and OKX XAUT/USDT — allocated gold, " +
-                    "one token per fine troy ounce. " +
+                "Full L2 depth from Kraken PAXG/USD, OKX XAUT/USDT and Coinbase PAXG/USD — " +
+                    "allocated gold, one token per fine troy ounce. " +
                     books.joinToString(" · ") { "${it.venue} ${it.bidLevels}+${it.askLevels} levels" },
-                "عمق کامل دفتر سفارش از کراکن و OKX",
-                "Both gold venues failed this cycle; the ETF top-of-book proxy is in use."
+                "عمق کامل دفتر سفارش از کراکن، OKX و کوین‌بیس",
+                "Every gold venue failed this cycle; the ETF top-of-book proxy is in use."
             ),
             resolution(
                 "اجماع تحلیلگران", "Analyst consensus",
                 features[FeatureKeys.CALENDAR_HIGH_IMPACT_24H] != null ||
                     features[FeatureKeys.CONSENSUS_SURPRISE] != null,
-                "ForexFactory surveyed consensus for every scheduled release, paired with " +
-                    "published actuals from the U.S. Bureau of Labor Statistics.",
-                "اجماع نظرسنجی‌شده به‌همراه داده‌های رسمی اداره آمار کار آمریکا",
+                "Scheduled releases for the US, euro area, UK, Japan and China with the published " +
+                    "consensus and the released actual on the same row, paired with official prints " +
+                    "from the U.S. Bureau of Labor Statistics. " +
+                    (features[FeatureKeys.ECONOMIC_SURPRISE_INDEX]?.let {
+                        String.format(Locale.US, "Surprise index %+.1f.", it.value)
+                    } ?: ""),
+                "اجماع و داده واقعی هر انتشار، به‌همراه ارقام رسمی اداره آمار کار آمریکا",
                 "The calendar feed did not answer this cycle."
             ),
             resolution(
@@ -505,19 +804,40 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
                 "قراردادهای تاریخ‌دار COMEX",
                 "No dated contract quoted this cycle."
             ),
-            Row(
-                "تقاضای بانک مرکزی", "Central bank demand", "NO_FREE_SOURCE",
-                badges = listOf(Badge("UNRESOLVED", BadgeKind.ERROR)),
-                noteFa = "آمار فصلی خرید بانک‌های مرکزی به‌صورت رایگان و ماشین‌خوان منتشر نمی‌شود",
-                noteEn = "Quarterly central-bank purchase statistics are published only as documents; " +
-                    "IMF IFS blocks programmatic access from this network. F10 stays unavailable rather " +
-                    "than being approximated."
+            resolution(
+                "تقاضای بانک مرکزی", "Central bank demand",
+                features[FeatureKeys.CENTRAL_BANK_NET_BUYING_3M] != null,
+                "Monthly gold holdings reported by national authorities under the IMF reserves " +
+                    "template (IRFCL line 56, fine troy ounces). " +
+                    (features[FeatureKeys.CENTRAL_BANK_NET_BUYING_3M]?.note ?: "") +
+                    (features[FeatureKeys.CENTRAL_BANK_PROXY_FLOW]?.let {
+                        String.format(Locale.US, " Breadth %+.0f%%.", it.value)
+                    } ?: ""),
+                "ذخایر طلای ماهانه کشورها بر پایه الگوی ذخایر صندوق بین‌المللی پول",
+                "The reserves template did not answer this cycle; F10 reports its absence."
             ),
-            Row(
-                "آنالوگ تاریخی", "Historical analogue", "NOT_AVAILABLE",
-                badges = listOf(Badge("UNRESOLVED", BadgeKind.ERROR)),
-                noteFa = "مجموعه‌داده تاریخی برچسب‌خورده وجود ندارد",
-                noteEn = "No labelled episode dataset exists; the layer reports its absence."
+            resolution(
+                "واگرایی نرخ سیاستی", "Policy rate divergence",
+                features[FeatureKeys.GLOBAL_CB_POLICY_DIVERGENCE]?.isProxy == false,
+                "Policy rates published by the central banks themselves via the BIS: US against the " +
+                    "mean of the euro area, UK, Japan, Switzerland and Canada. " +
+                    (features[FeatureKeys.GLOBAL_CB_POLICY_DIVERGENCE]?.let {
+                        String.format(Locale.US, "Current gap %+.2f pp.", it.value)
+                    } ?: ""),
+                "نرخ‌های سیاستی بانک‌های مرکزی از طریق بانک تسویه بین‌المللی",
+                "The policy rate table did not answer this cycle; the dollar-trend proxy is in use."
+            ),
+            resolution(
+                "آنالوگ تاریخی", "Historical analogue",
+                report.state.scenarios.isNotEmpty(),
+                "Matched against the stack's own daily history: the closest sessions by " +
+                    "gold trend and volatility, the dollar, equities, long bonds and equity fear, " +
+                    "each reported with the gold return realised over the " +
+                    "${SeriesAnalogueEngine.FORWARD_DAYS} sessions that followed. " +
+                    "${report.state.scenarios.size} non-overlapping matches this cycle. " +
+                    "No episode is labelled — no free dataset of labelled episodes exists.",
+                "تطبیق با تاریخچهٔ روزانهٔ خود برنامه، بدون برچسب‌گذاری رویدادها",
+                "Not enough history was loaded this cycle for a match."
             )
         )
 
@@ -581,9 +901,129 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
                 Section("تسلط اطلاعاتی", "Information Dominance", dominance),
                 Section("عمق بازار", "Market Depth", microstructure),
                 Section("منحنی آتی COMEX", "COMEX Forward Curve", curveRows),
+                Section("لایه استنتاج", "Inference Layer", inferenceRows(report)),
                 Section("وضعیت شکاف‌های داده", "Data Gap Status", gaps)
             )
         )
+    }
+
+    /**
+     * SPEC v2.1 §26.4–§26.7 — the structural reads that qualify the composite:
+     * how many independent bets it really contains, how old the regime is,
+     * whether the tape trends at all, and whether the call survives the
+     * removal of its loudest contributors.
+     */
+    private fun inferenceRows(report: IntelligenceReport): List<Row> {
+        val inference = report.inference
+            ?: return listOf(
+                Row(
+                    "لایه استنتاج", "Inference layer", "NOT_RUN",
+                    badges = listOf(Badge("NO_SAMPLE", BadgeKind.WARN)),
+                    noteEn = "No history was available to the walk-forward replay this cycle."
+                )
+            )
+
+        return buildList {
+            inference.effectiveBreadth?.let { enb ->
+                val ratio = inference.breadthRatio
+                add(
+                    Row(
+                        "تعداد مؤثر شرط‌ها", "Effective number of bets",
+                        fmt(enb, 2) + (ratio?.let { " of ${inference.calibratedOn.size}  (${pct(it)})" } ?: ""),
+                        badges = listOf(
+                            Badge(
+                                if ((ratio ?: 1.0) >= 0.6) "INDEPENDENT" else "REDUNDANT",
+                                if ((ratio ?: 1.0) >= 0.6) BadgeKind.OK else BadgeKind.WARN
+                            )
+                        ),
+                        noteEn = "Exponential entropy of the correlation matrix eigenvalues (Meucci 2009). " +
+                            "Factors that move together are one witness, not many; the model-agreement term " +
+                            "of the confidence formula is shrunk toward neutral by this ratio.",
+                        noteFa = "آنتروپی نمایی مقادیر ویژه ماتریس همبستگی عوامل"
+                    )
+                )
+            }
+            inference.runLength?.let { r ->
+                add(
+                    Row(
+                        "سن رژیم", "Regime age",
+                        "${r.mapRunLength} sessions  |  P(change) ${pct(r.changeProbability)}",
+                        badges = listOf(
+                            Badge(r.stability.name, when (r.stability) {
+                                Stability.HIGH -> BadgeKind.OK
+                                Stability.MEDIUM -> BadgeKind.INFO
+                                else -> BadgeKind.WARN
+                            })
+                        ),
+                        noteEn = "Bayesian online changepoint detection over ${r.observations} daily returns " +
+                            "(Adams & MacKay 2007): Normal-Inverse-Gamma conjugate predictive, constant hazard. " +
+                            "P(regime younger than ${ChangepointDetector.YOUNG_RUN} sessions) = " +
+                            pct(r.youngRegimeProbability) + ".",
+                        noteFa = "تشخیص نقطه تغییر بیزی برخط روی بازده‌های روزانه"
+                    )
+                )
+            }
+            inference.trend?.let { t ->
+                add(
+                    Row(
+                        "اعتبار روند", "Trend validity",
+                        "VR(${t.lag}) ${fmt(t.varianceRatio, 3)}  |  z ${fmt(t.zStatistic, 2)}" +
+                            (t.hurst?.let { "  |  H ${fmt(it, 3)}" } ?: ""),
+                        badges = listOf(
+                            Badge(t.label, if (t.label == "TRENDING") BadgeKind.OK else BadgeKind.WARN),
+                            Badge("CRED ${pct(t.momentumCredibility)}", BadgeKind.INFO)
+                        ),
+                        noteEn = "Lo & MacKinlay (1988) heteroskedasticity-robust variance ratio over " +
+                            "${t.observations} returns, with the rescaled-range Hurst exponent. " +
+                            "|z| below 1.96 means the random walk cannot be rejected, and the expected-move " +
+                            "point estimate is scaled by the credibility shown rather than asserted at full size.",
+                        noteFa = "آزمون نسبت واریانس لو و مک‌کینلی به‌همراه نمای هرست"
+                    )
+                )
+            }
+            inference.filtered?.let { f ->
+                add(
+                    Row(
+                        "سوگیری صاف‌شده پنل", "Filtered panel composite",
+                        fmt(f.level, 2) + " ± " + fmt(f.standardError, 2),
+                        badges = listOf(Badge("KALMAN", BadgeKind.INFO)),
+                        noteEn = "One-dimensional local-level Kalman filter over ${f.observations} sessions of " +
+                            "the replayed composite, steady-state gain ${fmt(f.gain, 3)}. " +
+                            "Reported beside the raw bias so a sign flip inside this band is readable as noise.",
+                        noteFa = "فیلتر کالمن سطح محلی روی سوگیری مرکب"
+                    )
+                )
+            }
+            inference.robustness?.let { r ->
+                add(
+                    Row(
+                        "شکنندگی پنل", "Panel fragility",
+                        "weighted ${fmt(r.weighted, 2)}  |  trimmed ${fmt(r.trimmed, 2)}  |  gap ${fmt(r.fragility, 2)}",
+                        badges = listOf(
+                            Badge(
+                                if (r.fragile) "FRAGILE" else "ROBUST",
+                                if (r.fragile) BadgeKind.WARN else BadgeKind.OK
+                            )
+                        ),
+                        noteEn = "The replayed panel composite against the trimmed mean of its ${r.contributors} " +
+                            "price-derived legs, with the top and bottom " + pct(RobustAggregate.TRIM_FRACTION) +
+                            " removed; median ${fmt(r.median, 2)}. A gap above " +
+                            "${fmt(RobustAggregate.FRAGILE_GAP, 0)} points means the panel reading rests on " +
+                            "one or two legs rather than on the whole panel.",
+                        noteFa = "ترکیب پس از حذف بلندترین و کوتاه‌ترین سهم‌ها"
+                    )
+                )
+            }
+            if (isEmpty()) {
+                add(
+                    Row(
+                        "لایه استنتاج", "Inference layer", "NO_OUTPUT",
+                        badges = listOf(Badge("NO_SAMPLE", BadgeKind.WARN)),
+                        noteEn = "Not enough history for any of the §26 components to answer."
+                    )
+                )
+            }
+        }
     }
 
     /* ---------------- Screen 7 — CHART (SPEC v2.1 §22) ----------------
@@ -803,6 +1243,22 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
         val counts = log.countsByLevel()
         val entries = log.snapshot()
         val summary = listOf(
+            Row(
+                "وضعیت ضبط", "Recording",
+                if (log.isRecording()) "ON" else "OFF",
+                badges = listOf(
+                    Badge(if (log.isRecording()) "LIVE" else "IDLE",
+                        if (log.isRecording()) BadgeKind.OK else BadgeKind.INFO)
+                ),
+                noteFa = if (log.isRecording()) "گزارش‌گیری روشن است و رویدادها ثبت می‌شوند"
+                else "گزارش‌گیری خاموش است؛ هیچ رکوردی نگهداری نمی‌شود",
+                noteEn = if (log.isRecording())
+                    "Recording; every stage writes here."
+                else
+                    "Switched off by default — nothing is retained. " +
+                        "${log.suppressedCount()} records were not taken.",
+                emphasis = true
+            ),
             Row("مجموع رکوردها", "Records", "${entries.size}", emphasis = true),
             Row("خطا", "Errors", "${counts[LogLevel.ERROR] ?: 0}",
                 badges = listOf(
@@ -932,6 +1388,39 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
         else -> BadgeKind.INFO
     }
 
+    /**
+     * How often the indicator's own source publishes. Judging a monthly
+     * statistic against a daily clock would label a perfectly current reading
+     * as expired, which is a presentation error, not a data one.
+     */
+    private fun publicationCadence(key: String): Duration = when (key) {
+        FeatureKeys.CENTRAL_BANK_NET_BUYING_3M,
+        FeatureKeys.CENTRAL_BANK_PROXY_FLOW -> Duration.ofDays(45)
+        FeatureKeys.COT_NET_POSITION_ZSCORE,
+        FeatureKeys.COT_EXTREME_LONG,
+        FeatureKeys.COT_EXTREME_SHORT -> Duration.ofDays(8)
+        FeatureKeys.INFLATION_SURPRISE -> Duration.ofDays(35)
+        // SPEC v2.1 §25 — the published macro series have their own calendars.
+        // The Chicago and St. Louis Fed indices are weekly, net liquidity
+        // follows the Wednesday balance sheet, and the daily FRED series post
+        // one business day in arrears.
+        FeatureKeys.FINANCIAL_CONDITIONS,
+        FeatureKeys.FINANCIAL_STRESS_SCORE,
+        FeatureKeys.FED_NET_LIQUIDITY,
+        FeatureKeys.FED_NET_LIQUIDITY_CHANGE -> Duration.ofDays(10)
+        FeatureKeys.CREDIT_SPREAD_HY,
+        FeatureKeys.POLICY_UNCERTAINTY,
+        FeatureKeys.NEWS_UNCERTAINTY,
+        FeatureKeys.GEOPOLITICAL_RISK_SCORE,
+        FeatureKeys.GEOPOLITICAL_RISK_DELTA,
+        FeatureKeys.INFLATION_EXPECTATION_5Y5Y,
+        FeatureKeys.REAL_YIELD,
+        FeatureKeys.REAL_YIELD_ZSCORE,
+        FeatureKeys.REAL_YIELD_TREND,
+        FeatureKeys.BREAKEVEN_CHANGE -> Duration.ofDays(4)
+        else -> Duration.ofDays(1)
+    }
+
     private fun stalenessBadge(asOf: Instant?, expected: Duration, now: Instant): Badge? {
         if (asOf == null) return null
         val age = Duration.between(asOf, now)
@@ -954,6 +1443,12 @@ class ScreenModelBuilder(private val log: DiagnosticLog = DiagnosticLog.shared) 
         Direction.BULLISH -> "BULLISH ▲"
         Direction.BEARISH -> "BEARISH ▼"
         Direction.NEUTRAL -> "NEUTRAL ■"
+    }
+
+    private fun badgeForDirection(d: Direction): BadgeKind = when (d) {
+        Direction.BULLISH -> BadgeKind.OK
+        Direction.BEARISH -> BadgeKind.WARN
+        Direction.NEUTRAL -> BadgeKind.INFO
     }
 
     private fun fmt(v: Double, decimals: Int): String = String.format(Locale.US, "%.${decimals}f", v)

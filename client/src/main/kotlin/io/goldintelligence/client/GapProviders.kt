@@ -75,6 +75,25 @@ class TradingViewProvider(
             "OANDA:XAUUSD",
             "FX_IDC:XAUUSD"
         )
+
+        /**
+         * SPEC v2.1 §25.3 — the policy path the market is actually paying for,
+         * the volatility of the bond market, the sovereign curves gold is
+         * priced against outside the dollar, and the competing store of value.
+         * All probed live on this screener; none needs a second provider.
+         */
+        val MACRO = listOf(
+            "CBOT:ZQ1!",       // 30-day fed funds futures, front month
+            "CBOT:ZQZ2026",
+            "CBOT:ZQH2027",
+            "CBOT:ZQM2027",    // ~12 months out: the priced policy rate
+            "TVC:MOVE",        // ICE BofA bond-market option volatility
+            "TVC:DE10Y",
+            "TVC:JP10Y",
+            "TVC:GB10Y",
+            "TVC:CN10Y",
+            "CRYPTO:BTCUSD"
+        )
     }
 
     private val columns = listOf(

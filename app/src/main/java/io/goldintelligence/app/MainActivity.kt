@@ -116,6 +116,11 @@ class MainActivity : Activity() {
         root.addView(buildFooter())
 
         setContentView(root)
+        // SPEC v2.1 §21.1 — the recorder is off unless the user turned it on
+        // in a previous session; nothing is written until then.
+        DiagnosticLog.shared.setRecording(
+            getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_LOGGING, false)
+        )
         render()
         refresh()
     }
@@ -788,6 +793,48 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) }
         }
 
+        val recording = DiagnosticLog.shared.isRecording()
+        val switch = Button(this).apply {
+            text = when {
+                recording && persian -> "گزارش‌گیری روشن است — برای خاموش‌کردن بزنید"
+                recording -> "Recording is ON — tap to switch off"
+                persian -> "گزارش‌گیری خاموش است — برای روشن‌کردن بزنید"
+                else -> "Recording is OFF — tap to switch on"
+            }
+            isAllCaps = false
+            setTextColor(if (recording) BG else ACCENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            background = pill(if (recording) GREEN else PANEL_HI, if (recording) GREEN else ACCENT_DIM)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) }
+            setOnClickListener {
+                val on = !DiagnosticLog.shared.isRecording()
+                DiagnosticLog.shared.setRecording(on)
+                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putBoolean(PREF_LOGGING, on).apply()
+                toast(
+                    when {
+                        on && persian -> "گزارش‌گیری روشن شد؛ ضبط از همین لحظه آغاز می‌شود"
+                        on -> "Recording on; capture starts from this moment"
+                        persian -> "گزارش‌گیری خاموش شد"
+                        else -> "Recording off"
+                    }
+                )
+                render()
+            }
+        }
+        box.addView(switch)
+        box.addView(
+            note(
+                if (persian)
+                    "تا زمانی که این کلید خاموش است هیچ رکوردی نگهداری نمی‌شود. برای ثبت یک " +
+                        "چرخه کامل، آن را روشن کنید و سپس «به‌روزرسانی» بزنید."
+                else
+                    "While the switch is off nothing is retained. To capture a full cycle, " +
+                        "switch it on and then press Refresh."
+            )
+        )
+
         val search = EditText(this).apply {
             hint = if (persian) "جستجو در شاخص، کد یا پیام" else "Filter by indicator, code or message"
             setText(logFilter)
@@ -1104,6 +1151,10 @@ class MainActivity : Activity() {
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
         private const val AUTO_REFRESH_MS = 60_000L
         private const val REQ_EXPORT_LOG = 7301
+
+        /** Where the logger switch is remembered between sessions. */
+        private const val PREFS = "gold_intelligence"
+        private const val PREF_LOGGING = "logging_enabled"
 
         private val BG = Color.parseColor("#0B0D10")
         private val PANEL = Color.parseColor("#12161B")

@@ -10,6 +10,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 
 /** Static provenance for every provider the free stack is allowed to use. */
 data class ProviderSpec(
@@ -114,13 +115,114 @@ object Providers {
      * Yahoo's futures history is covered by the Cboe GLD series and the
      * TradingView curve, and the Eastmoney mirror only backs up Sina.
      */
-    val optionalIds: Set<String> = setOf("YAHOO", "EASTMONEY_SGE")
+    /* ---- SPEC v2.1 §23 — quality sources ------------------------- */
+
+    val IMF_RESERVES = ProviderSpec(
+        "IMF_RESERVES", "IMF — International Reserves (IRFCL)", "https://api.imf.org",
+        LicenseClass.ATTRIBUTION, Tier.A,
+        "Official reserve assets as reported by national authorities to the IMF"
+    )
+    val CALENDAR = ProviderSpec(
+        "CALENDAR", "Economic calendar with released actuals",
+        "https://economic-calendar.tradingview.com",
+        LicenseClass.ATTRIBUTION, Tier.B,
+        "Scheduled releases with consensus and actual prints"
+    )
+    val BIS = ProviderSpec(
+        "BIS", "Bank for International Settlements", "https://stats.bis.org",
+        LicenseClass.ATTRIBUTION, Tier.A,
+        "Central bank policy rates, © Bank for International Settlements"
+    )
+    val OECD = ProviderSpec(
+        "OECD", "OECD SDMX", "https://sdmx.oecd.org",
+        LicenseClass.ATTRIBUTION, Tier.A,
+        "Organisation for Economic Co-operation and Development"
+    )
+
+    val COINBASE = ProviderSpec(
+        "COINBASE", "Coinbase Exchange (PAXG/USD)", "https://api.exchange.coinbase.com",
+        LicenseClass.ATTRIBUTION, Tier.B,
+        "Level-2 order book for PAXG/USD"
+    )
+
+    /* ---- SPEC v2.1 §25 — measured macro and news-derived series ---- */
+
+    /**
+     * FRED's chart export serves any published series as CSV without an API
+     * key. The documented `api.stlouisfed.org` route does require one, which
+     * is why several inputs were proxies until now.
+     */
+    val FRED = ProviderSpec(
+        "FRED", "Federal Reserve Bank of St. Louis (FRED)", "https://fred.stlouisfed.org",
+        LicenseClass.PUBLIC_DOMAIN, Tier.A,
+        "Series published by FRED, Federal Reserve Bank of St. Louis"
+    )
+
+    val optionalIds: Set<String> = setOf("YAHOO", "EASTMONEY_SGE", "COINBASE")
 
     val all = listOf(
         CBOE, GOLD_API, TREASURY, CFTC, NY_FED, ECB_FX, YAHOO,
         TRADINGVIEW, KRAKEN, OKX, SWISSQUOTE, SINA_SGE, EASTMONEY_SGE,
-        FOREXFACTORY, BLS, GOLDPRICE_ORG, WGC
+        FOREXFACTORY, BLS, GOLDPRICE_ORG, WGC,
+        IMF_RESERVES, CALENDAR, BIS, COINBASE, FRED
     )
+}
+
+/* ------------------------------------------------------------------ */
+/* FRED — keyless CSV export                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * SPEC v2.1 §25.1.
+ *
+ * `fred.stlouisfed.org/graph/fredgraph.csv?id=…` returns the full observation
+ * history of a published series as two CSV columns and needs no key, no
+ * account and no registration. Missing observations are published as `.` and
+ * are dropped rather than carried forward.
+ *
+ * The endpoint refuses a browser User-Agent from datacentre ranges, so the
+ * request carries this project's own agent string instead of the stack
+ * default.
+ */
+class FredProvider(private val http: HttpClient) {
+
+    fun series(id: String, since: String? = null): TimeSeries? {
+        val url = buildString {
+            append("https://fred.stlouisfed.org/graph/fredgraph.csv?id=").append(id)
+            if (since != null) append("&cosd=").append(since)
+        }
+        val text = http.getText(Providers.FRED.id, url, headers = mapOf("User-Agent" to AGENT))
+            ?: return null
+        return parse(id, text)
+    }
+
+    /** Visible for test: the CSV shape FRED publishes. */
+    fun parse(id: String, csv: String): TimeSeries? {
+        val lines = csv.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return null
+        val header = lines.first().split(',')
+        if (header.size < 2) return null
+        val bars = ArrayList<Bar>(lines.size - 1)
+        for (line in lines.drop(1)) {
+            val cols = line.split(',')
+            if (cols.size < 2) continue
+            // FRED publishes a missing observation as "." — never zero-filled.
+            val value = cols[1].trim().toDoubleOrNull() ?: continue
+            val day = try {
+                LocalDate.parse(cols[0].trim())
+            } catch (_: Exception) {
+                continue
+            }
+            val t = day.atStartOfDay(ZoneOffset.UTC).toInstant()
+            bars += Bar(t, value, value, value, value)
+        }
+        if (bars.isEmpty()) return null
+        return TimeSeries(id, bars.sortedBy { it.timestamp }, Frequency.DAILY)
+    }
+
+    companion object {
+        const val AGENT = "GoldIntelligence/1.0 (+https://github.com/alisport1384/IDIE_GLD_INT_ENGN)"
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -143,9 +245,118 @@ data class CboeQuote(
     val asOf: Instant
 )
 
+/** One listed contract, reduced to the fields the measurements need. */
+data class OptionContract(
+    val expiry: LocalDate,
+    val isCall: Boolean,
+    val strike: Double,
+    val iv: Double,
+    val delta: Double,
+    val openInterest: Double,
+    val volume: Double
+)
+
+/**
+ * SPEC v2.1 §25.2 — measurements taken from a published option chain.
+ * Every figure below is a weighted count or an interpolation between two
+ * quoted contracts; nothing is modelled.
+ */
+data class OptionChain(
+    val symbol: String,
+    val underlying: Double,
+    val asOf: Instant,
+    val contracts: List<OptionContract>
+) {
+    private val live = contracts.filter { it.iv > 0.0 && it.expiry.isAfter(LocalDate.now(ZoneOffset.UTC)) }
+
+    val openInterestTotal: Double get() = contracts.sumOf { it.openInterest }
+
+    /** Put open interest over call open interest; above 1 the chain is hedged for downside. */
+    val putCallOpenInterest: Double?
+        get() {
+            val calls = contracts.filter { it.isCall }.sumOf { it.openInterest }
+            val puts = contracts.filter { !it.isCall }.sumOf { it.openInterest }
+            return if (calls > 0.0) puts / calls else null
+        }
+
+    /** Same ratio on the session's traded volume: today's demand, not the legacy book. */
+    val putCallVolume: Double?
+        get() {
+            val calls = contracts.filter { it.isCall }.sumOf { it.volume }
+            val puts = contracts.filter { !it.isCall }.sumOf { it.volume }
+            return if (calls > 0.0) puts / calls else null
+        }
+
+    /**
+     * 25-delta risk reversal in volatility points: the implied volatility the
+     * market charges for a 25-delta call minus the one it charges for the
+     * mirror put, on the nearest expiry at least [MIN_TENOR_DAYS] out.
+     * Positive means upside is the expensive side.
+     */
+    val riskReversal25: Double? get() = riskReversalFor(nearTerm())
+
+    /** The same measure on the next quarterly-sized tenor, for the term view. */
+    val riskReversal25Far: Double? get() = riskReversalFor(farTerm())
+
+    /** At-the-money implied volatility of the far tenor minus the near one. */
+    val ivTermSlope: Double?
+        get() {
+            val near = atmIv(nearTerm()) ?: return null
+            val far = atmIv(farTerm()) ?: return null
+            return (far - near) * 100.0
+        }
+
+    val nearTermExpiry: LocalDate? get() = nearTerm()
+
+    private fun nearTerm(): LocalDate? {
+        val today = LocalDate.now(ZoneOffset.UTC)
+        return live.map { it.expiry }
+            .filter { java.time.temporal.ChronoUnit.DAYS.between(today, it) >= MIN_TENOR_DAYS }
+            .minOrNull()
+    }
+
+    private fun farTerm(): LocalDate? {
+        val today = LocalDate.now(ZoneOffset.UTC)
+        return live.map { it.expiry }
+            .filter { java.time.temporal.ChronoUnit.DAYS.between(today, it) >= FAR_TENOR_DAYS }
+            .minOrNull()
+    }
+
+    private fun riskReversalFor(expiry: LocalDate?): Double? {
+        if (expiry == null) return null
+        val slice = live.filter { it.expiry == expiry }
+        val call = slice.filter { it.isCall && it.delta > 0.0 }
+            .minByOrNull { abs(it.delta - TARGET_DELTA) } ?: return null
+        val put = slice.filter { !it.isCall && it.delta < 0.0 }
+            .minByOrNull { abs(abs(it.delta) - TARGET_DELTA) } ?: return null
+        // Refuse the reading when neither wing is close to 25 delta.
+        if (abs(call.delta - TARGET_DELTA) > DELTA_TOLERANCE) return null
+        if (abs(abs(put.delta) - TARGET_DELTA) > DELTA_TOLERANCE) return null
+        return (call.iv - put.iv) * 100.0
+    }
+
+    private fun atmIv(expiry: LocalDate?): Double? {
+        if (expiry == null) return null
+        val slice = live.filter { it.expiry == expiry }
+        if (slice.isEmpty()) return null
+        val nearest = slice.minByOrNull { abs(it.strike - underlying) } ?: return null
+        val pair = slice.filter { abs(it.strike - nearest.strike) < 1e-9 }
+        return if (pair.isEmpty()) null else pair.map { it.iv }.average()
+    }
+
+    companion object {
+        /** Contracts inside this window are dominated by expiry mechanics. */
+        const val MIN_TENOR_DAYS = 14L
+        const val FAR_TENOR_DAYS = 75L
+        const val TARGET_DELTA = 0.25
+        const val DELTA_TOLERANCE = 0.08
+    }
+}
+
 class CboeProvider(private val http: HttpClient) {
     private val quoteBase = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/"
     private val histBase = "https://cdn.cboe.com/api/global/delayed_quotes/charts/historical/"
+    private val optionBase = "https://cdn.cboe.com/api/global/delayed_quotes/options/"
 
     /** Index symbols are requested with a leading underscore on this endpoint. */
     private fun encode(symbol: String): String = if (symbol.startsWith("^")) "_" + symbol.drop(1) else symbol
@@ -197,11 +408,62 @@ class CboeProvider(private val http: HttpClient) {
         return TimeSeries(symbol, bars.takeLast(maxBars), Frequency.DAILY)
     }
 
+    /**
+     * SPEC v2.1 §25.2 — the full delayed option chain for one underlying.
+     * Cboe publishes every listed contract with its implied volatility,
+     * open interest, volume and greeks, which is what makes a measured
+     * risk reversal and a measured put/call ratio possible at all.
+     */
+    fun optionChain(symbol: String): OptionChain? {
+        val json = http.getJson(Providers.CBOE.id, optionBase + encode(symbol) + ".json") ?: return null
+        val d = json["data"] ?: return null
+        val rows = d["options"]?.asArray ?: return null
+        if (rows.isEmpty()) return null
+        val underlying = d["current_price"]?.asDouble ?: d["close"]?.asDouble ?: return null
+        val asOf = json["timestamp"]?.asString?.let { parseCboeTimestamp(it) } ?: Instant.now()
+        val contracts = rows.mapNotNull { row ->
+            val name = row["option"]?.asString ?: return@mapNotNull null
+            val parsed = parseOptionSymbol(name) ?: return@mapNotNull null
+            OptionContract(
+                expiry = parsed.first,
+                isCall = parsed.second,
+                strike = parsed.third,
+                iv = row["iv"]?.asDouble ?: 0.0,
+                delta = row["delta"]?.asDouble ?: 0.0,
+                openInterest = row["open_interest"]?.asDouble ?: 0.0,
+                volume = row["volume"]?.asDouble ?: 0.0
+            )
+        }
+        if (contracts.isEmpty()) return null
+        return OptionChain(symbol, underlying, asOf, contracts)
+    }
+
+    /**
+     * OCC symbol: root, `yyMMdd`, `C`/`P`, then the strike in thousandths.
+     * Returns null rather than guessing when the shape is not the OCC one.
+     */
+    private fun parseOptionSymbol(raw: String): Triple<LocalDate, Boolean, Double>? {
+        val m = OCC.find(raw) ?: return null
+        val (yy, mm, dd, cp, strike) = m.destructured
+        val date = try {
+            LocalDate.of(2000 + yy.toInt(), mm.toInt(), dd.toInt())
+        } catch (_: Exception) {
+            return null
+        }
+        val k = strike.toDoubleOrNull()?.div(1000.0) ?: return null
+        return Triple(date, cp == "C", k)
+    }
+
     private fun parseCboeTimestamp(raw: String): Instant? = try {
         LocalDateTime.parse(raw.trim(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
             .toInstant(ZoneOffset.UTC)
     } catch (_: Exception) {
         null
+    }
+
+    companion object {
+        /** OCC contract symbol: root, yyMMdd, C or P, strike in thousandths. */
+        private val OCC = Regex("""[A-Z]+(\d{2})(\d{2})(\d{2})([CP])(\d{8})""")
     }
 }
 
@@ -311,6 +573,8 @@ class TreasuryProvider(private val http: HttpClient) {
         const val T3M = "3M"
         const val T30Y = "30Y"
         const val T5Y = "5Y"
+        const val T7Y = "7Y"
+        const val T20Y = "20Y"
     }
 }
 
@@ -344,6 +608,61 @@ class CftcProvider(private val http: HttpClient) {
             }
             CotRow(ts, long - short, row["open_interest_all"]?.asDouble)
         }.sortedBy { it.date }
+    }
+
+    /**
+     * SPEC v2.1 §27 — the disaggregated report, which splits the old
+     * "non-commercial" bucket into the categories the CFTC actually
+     * publishes. Managed money is the speculative leg; the swap dealers and
+     * producers sit on the other side. Same host, same licence, one request.
+     */
+    data class CotDetail(
+        val date: Instant,
+        val managedMoneyNet: Double,
+        val commercialNet: Double,
+        val openInterest: Double?
+    )
+
+    fun disaggregated(maxWeeks: Int = 400): List<CotDetail> {
+        val url = "https://publicreporting.cftc.gov/resource/72hh-3qpy.json" +
+            "?\$limit=$maxWeeks&\$order=report_date_as_yyyy_mm_dd%20DESC" +
+            "&cftc_contract_market_code=$contractCode"
+        val json = http.getJson(Providers.CFTC.id, url) ?: return emptyList()
+        return json.asArray.mapNotNull { row ->
+            val ts = instantOf(row["report_date_as_yyyy_mm_dd"]?.asString) ?: return@mapNotNull null
+            val mmLong = row["m_money_positions_long_all"]?.asDouble ?: return@mapNotNull null
+            val mmShort = row["m_money_positions_short_all"]?.asDouble ?: return@mapNotNull null
+            // Producers/merchants/processors/users — the commercial hedgers.
+            val cLong = row["prod_merc_positions_long"]?.asDouble
+            val cShort = row["prod_merc_positions_short"]?.asDouble
+            CotDetail(
+                ts,
+                mmLong - mmShort,
+                if (cLong != null && cShort != null) cLong - cShort else Double.NaN,
+                row["open_interest_all"]?.asDouble
+            )
+        }.filter { it.managedMoneyNet.isFinite() }.sortedBy { it.date }
+    }
+
+    private fun instantOf(raw: String?): Instant? {
+        val d = raw ?: return null
+        return try {
+            LocalDateTime.parse(d.substringBefore('.')).toInstant(ZoneOffset.UTC)
+        } catch (_: Exception) {
+            try {
+                LocalDate.parse(d.substring(0, 10)).atStartOfDay(ZoneOffset.UTC).toInstant()
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    fun detailSeries(rows: List<CotDetail>, id: String, pick: (CotDetail) -> Double?): TimeSeries? {
+        val bars = rows.mapNotNull { r ->
+            val v = pick(r)?.takeIf { it.isFinite() } ?: return@mapNotNull null
+            Bar(r.date, v, v, v, v, r.openInterest)
+        }
+        return if (bars.size < 10) null else TimeSeries(id, bars, Frequency.WEEKLY)
     }
 
     fun toSeries(rows: List<CotRow>, id: String): TimeSeries? {
@@ -392,6 +711,54 @@ class NyFedProvider(private val http: HttpClient) {
             Bar(d.atStartOfDay(ZoneOffset.UTC).toInstant(), v, v, v, v, null)
         }
         return if (bars.size < 20) null else TimeSeries("FUNDING_SPREAD", bars, Frequency.DAILY)
+    }
+
+    /**
+     * SPEC v2.1 §27 — the System Open Market Account, i.e. the securities the
+     * Fed actually holds, published weekly by the desk that holds them. The
+     * balance-sheet leg of F17 previously came from the FRED aggregate alone.
+     */
+    fun somaTotal(): TimeSeries? {
+        val json = http.getJson(Providers.NY_FED.id, "https://markets.newyorkfed.org/api/soma/summary.json")
+            ?: return null
+        val rows = json["soma"]?.get("summary")?.asArray ?: return null
+        val bars = rows.mapNotNull { r ->
+            val d = r["asOfDate"]?.asString ?: return@mapNotNull null
+            val total = r["total"]?.asDouble ?: return@mapNotNull null
+            val date = try {
+                LocalDate.parse(d)
+            } catch (_: Exception) {
+                return@mapNotNull null
+            }
+            // Published in dollars; carried in billions like the other
+            // liquidity series so the scales on screen are comparable.
+            val v = total / 1_000_000_000.0
+            Bar(date.atStartOfDay(ZoneOffset.UTC).toInstant(), v, v, v, v, null)
+        }.sortedBy { it.timestamp }
+        return if (bars.size < 50) null else TimeSeries("SOMA_TOTAL", bars, Frequency.WEEKLY)
+    }
+
+    /**
+     * SPEC v2.1 §27 — the 99th-percentile SOFR print minus the volume-weighted
+     * median, in basis points. The tail of the repo distribution moves before
+     * the average does, so it is the earlier read on funding stress.
+     */
+    fun sofrTailSeries(days: Int = 250): TimeSeries? {
+        val url = "https://markets.newyorkfed.org/api/rates/secured/sofr/last/$days.json"
+        val json = http.getJson(Providers.NY_FED.id, url) ?: return null
+        val bars = json["refRates"]?.asArray?.mapNotNull { r ->
+            val d = r["effectiveDate"]?.asString ?: return@mapNotNull null
+            val mid = r["percentRate"]?.asDouble ?: return@mapNotNull null
+            val p99 = r["percentPercentile99"]?.asDouble ?: return@mapNotNull null
+            val date = try {
+                LocalDate.parse(d)
+            } catch (_: Exception) {
+                return@mapNotNull null
+            }
+            val v = (p99 - mid) * 100.0
+            Bar(date.atStartOfDay(ZoneOffset.UTC).toInstant(), v, v, v, v, null)
+        }?.sortedBy { it.timestamp } ?: return null
+        return if (bars.size < 20) null else TimeSeries("SOFR_P99_SPREAD", bars, Frequency.DAILY)
     }
 
     fun latestRates(): Map<String, Double> {
@@ -524,6 +891,65 @@ class YahooProvider(private val http: HttpClient) {
             val last = s.last?.close ?: continue
             out[c] = last
         }
+        return out
+    }
+}
+
+
+/* ------------------------------------------------------------------ */
+/* OECD composite leading indicator (SPEC v2.1 §27)                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The OECD's composite leading indicator for the United States, from the
+ * organisation's own SDMX endpoint in CSV form. It is the growth-turning-point
+ * read F06 previously had to infer from the surprise index alone: an amplitude
+ * -adjusted index where 100 is trend, above 100 is expansion.
+ */
+class OecdProvider(private val http: HttpClient) {
+
+    fun compositeLeadingIndicator(startPeriod: String = "2003-01"): TimeSeries? {
+        val url = "https://sdmx.oecd.org/public/rest/data/" +
+            "OECD.SDD.STES,DSD_STES@DF_CLI,/USA.M.LI...AA...H" +
+            "?startPeriod=$startPeriod&format=csvfile"
+        val csv = http.getText(Providers.OECD.id, url) ?: return null
+        val lines = csv.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return null
+        val header = lines.first().split(',').map { it.trim().trim('"') }
+        val periodAt = header.indexOf("TIME_PERIOD")
+        val valueAt = header.indexOf("OBS_VALUE")
+        if (periodAt < 0 || valueAt < 0) return null
+        val bars = lines.drop(1).mapNotNull { line ->
+            val cols = splitCsv(line)
+            if (cols.size <= maxOf(periodAt, valueAt)) return@mapNotNull null
+            val period = cols[periodAt].trim().trim('"')
+            val value = cols[valueAt].trim().trim('"').toDoubleOrNull() ?: return@mapNotNull null
+            // Monthly periods arrive as YYYY-MM and are dated to the first.
+            val date = try {
+                LocalDate.parse(if (period.length == 7) "$period-01" else period)
+            } catch (_: Exception) {
+                return@mapNotNull null
+            }
+            Bar(date.atStartOfDay(ZoneOffset.UTC).toInstant(), value, value, value, value, null)
+        }.sortedBy { it.timestamp }
+        return if (bars.size < 12) null else TimeSeries("OECD_CLI_US", bars, Frequency.MONTHLY)
+    }
+
+    /** Minimal RFC-4180 split: quoted fields may contain commas. */
+    private fun splitCsv(line: String): List<String> {
+        val out = ArrayList<String>()
+        val sb = StringBuilder()
+        var quoted = false
+        for (c in line) {
+            when {
+                c == '"' -> quoted = !quoted
+                c == ',' && !quoted -> {
+                    out += sb.toString(); sb.setLength(0)
+                }
+                else -> sb.append(c)
+            }
+        }
+        out += sb.toString()
         return out
     }
 }

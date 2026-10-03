@@ -290,21 +290,55 @@ object ExpectedMoveEngine {
         Horizon.W1 -> 1.05
     }
 
-    data class Band(val point: Double, val p5: Double, val p95: Double, val sigma: Double)
+    data class Band(
+        val point: Double,
+        val p5: Double,
+        val p95: Double,
+        val sigma: Double,
+        /**
+         * `GAUSSIAN` ⇒ the ±1.645σ normal quantile, assumed. `CONFORMAL` ⇒ a
+         * half-width measured on out-of-sample residuals with a finite-sample
+         * coverage guarantee (SPEC v2.1 §26.2).
+         */
+        val intervalSource: String = GAUSSIAN,
+        /** Multiple of sigma used for the band half-width. */
+        val halfWidthSigma: Double = GAUSSIAN_Q
+    )
+
+    /** ±1.645σ, the 90 % two-sided normal interval. */
+    const val GAUSSIAN_Q = 1.645
+    const val GAUSSIAN = "GAUSSIAN"
+    const val CONFORMAL = "CONFORMAL"
 
     /**
      * @param sigma realized volatility of gold over the horizon, in price units
      * @param probability directional probability in [0,1]; null ⇒ no band
+     * @param conformalHalfWidth measured half-width in sigma units; when
+     *        present it replaces the assumed normal quantile (§26.2)
+     * @param momentumCredibility in [0,1] from the variance-ratio test; the
+     *        point estimate is scaled by it, so a directional call made on a
+     *        tape that tests as a random walk is not asserted at full size
+     *        (§26.6). Null leaves the point estimate untouched.
      */
-    fun compute(horizon: Horizon, sigma: Double?, probability: Double?): Band? {
+    fun compute(
+        horizon: Horizon,
+        sigma: Double?,
+        probability: Double?,
+        conformalHalfWidth: Double? = null,
+        momentumCredibility: Double? = null
+    ): Band? {
         if (sigma == null || sigma <= 0.0 || probability == null) return null
         val edge = (2.0 * probability.coerceIn(0.0, 1.0)) - 1.0
-        val point = k(horizon) * sigma * edge
+        val credibility = momentumCredibility?.coerceIn(0.0, 1.0) ?: 1.0
+        val point = k(horizon) * sigma * edge * credibility
+        val q = conformalHalfWidth?.takeIf { it.isFinite() && it > 0.0 } ?: GAUSSIAN_Q
         return Band(
             point = point,
-            p5 = point - 1.645 * sigma,
-            p95 = point + 1.645 * sigma,
-            sigma = sigma
+            p5 = point - q * sigma,
+            p95 = point + q * sigma,
+            sigma = sigma,
+            intervalSource = if (conformalHalfWidth != null && conformalHalfWidth > 0.0) CONFORMAL else GAUSSIAN,
+            halfWidthSigma = q
         )
     }
 }

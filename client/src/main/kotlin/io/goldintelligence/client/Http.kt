@@ -298,6 +298,18 @@ class HttpClient(
     }
 
     companion object {
+        /**
+         * One free feed answers only when the request carries the `Origin` of
+         * the page it belongs to, and the desktop JVM's HTTP stack drops that
+         * header unless this property is set before the first connection is
+         * opened. Android's stack has no such restriction. Setting it here —
+         * in the client's own class initialiser, which runs before any call —
+         * is the only point where the ordering is guaranteed.
+         */
+        init {
+            runCatching { System.setProperty("sun.net.http.allowRestrictedHeaders", "true") }
+        }
+
         const val DEFAULT_UA =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 GoldIntelligence/1.0"
         const val MAX_BODY_BYTES = 12 * 1024 * 1024

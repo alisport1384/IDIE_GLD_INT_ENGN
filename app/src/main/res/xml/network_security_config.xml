@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPEC v2.1 §23.8 — trust anchors.
+
+  api.imf.org is issued under "Sectigo Public Server Authentication Root R46",
+  a root created in March 2021. Devices whose trust store predates it — every
+  Android 10 handset that never received a Conscrypt update — reject the chain
+  with "Trust anchor for certification path not found" and the reserves feed,
+  and with it the central-bank factor, disappears on exactly those devices.
+
+  The root is bundled and trusted for those two hosts only, in addition to the
+  system store, never instead of it. Fingerprint (SHA-256):
+  7B:B6:47:A6:2A:EE:AC:88:BF:25:7A:A5:22:D0:1F:FE:A3:95:E0:AB:45:C7:3F:93:F6:56:54:EC:38:F2:5A:06
+  as published by Sectigo and carried by the Mozilla, Microsoft, Apple and
+  Chrome root programmes.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config>
+        <domain includeSubdomains="true">api.imf.org</domain>
+        <domain includeSubdomains="true">fiscaldata.treasury.gov</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/sectigo_server_root_r46" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

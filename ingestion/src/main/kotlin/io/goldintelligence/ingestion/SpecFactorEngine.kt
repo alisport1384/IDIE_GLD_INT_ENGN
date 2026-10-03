@@ -156,13 +156,21 @@ class SpecFactorEngine(private val log: DiagnosticLog = DiagnosticLog.shared) {
         )
 
         /* F05 — Inflation. Rising breakevens compress real yields. */
+        /* SPEC v2.1 §25.1 — the five-year, five-year forward rate is what the
+         * market expects once the current cycle has washed out; above target
+         * it is a standing bid under gold. */
         emit(
             "F05_INFLATION",
             blend(
-                Stats.ratioToScore(f(FeatureKeys.BREAKEVEN_CHANGE), 0.20) to 0.6,
-                Stats.zToScore(f(FeatureKeys.INFLATION_SURPRISE), 2.0) to 0.4
+                Stats.ratioToScore(f(FeatureKeys.BREAKEVEN_CHANGE), 0.20) to 0.45,
+                Stats.zToScore(f(FeatureKeys.INFLATION_SURPRISE), 2.0) to 0.30,
+                f(FeatureKeys.INFLATION_EXPECTATION_5Y5Y)
+                    ?.let { Stats.ratioToScore(it - INFLATION_TARGET, 0.60) } to 0.25
             ),
-            listOf(FeatureKeys.BREAKEVEN_CHANGE, FeatureKeys.INFLATION_SURPRISE)
+            listOf(
+                FeatureKeys.BREAKEVEN_CHANGE, FeatureKeys.INFLATION_SURPRISE,
+                FeatureKeys.INFLATION_EXPECTATION_5Y5Y
+            )
         )
 
         /* F06 — Growth surprise. Stronger growth supports real rates and risk assets. */
@@ -204,13 +212,20 @@ class SpecFactorEngine(private val log: DiagnosticLog = DiagnosticLog.shared) {
             listOf(FeatureKeys.ETF_FLOW_ZSCORE, FeatureKeys.ETF_HOLDINGS_CHANGE)
         )
 
-        /* F10 — Central-bank demand. No free machine-readable series exists. */
+        /* F10 — Central-bank demand (SPEC v2.1 §23).
+         * Measured from the monthly reserves template: how much gold the
+         * official sector added over the last three reported months, and how
+         * broadly it was spread across reporting countries. Breadth guards
+         * against a single large reporter carrying the whole signal.
+         */
         emit(
             "F10_CENTRAL_BANK_DEMAND",
-            Stats.zToScore(f(FeatureKeys.CENTRAL_BANK_NET_BUYING_3M), 2.0),
-            emptyList(),
-            listOf(FeatureKeys.CENTRAL_BANK_NET_BUYING_3M),
-            reason = "NO_FREE_SOURCE: WGC quarterly demand and IMF IFS reserve tables are not available as a free machine-readable feed."
+            blend(
+                Stats.zToScore(f(FeatureKeys.CENTRAL_BANK_NET_BUYING_3M), 2.0) to 0.7,
+                Stats.ratioToScore(f(FeatureKeys.CENTRAL_BANK_PROXY_FLOW), 25.0) to 0.3
+            ),
+            listOf(FeatureKeys.CENTRAL_BANK_NET_BUYING_3M, FeatureKeys.CENTRAL_BANK_PROXY_FLOW),
+            listOf(FeatureKeys.CENTRAL_BANK_NET_BUYING_3M)
         )
 
         /* F11 — Positioning. Crowding is contrarian. */
@@ -246,13 +261,23 @@ class SpecFactorEngine(private val log: DiagnosticLog = DiagnosticLog.shared) {
         )
 
         /* F15 — Options / volatility. An implied-over-realized premium prices hedging demand. */
+        /* SPEC v2.1 §25.2 — the chain itself now carries a direction.
+         * A positive 25-delta risk reversal means the market pays more for
+         * upside than for the mirror downside, and a put/call open interest
+         * ratio above one means the book is hedged for a fall. Both are
+         * counted from published contracts, so they lead the blend. */
         emit(
             "F15_OPTIONS_VOLATILITY",
             blend(
-                Stats.ratioToScore(f(FeatureKeys.GOLD_IV_SKEW), 8.0) to 0.6,
-                Stats.zToScore(f(FeatureKeys.GOLD_REALIZED_VOL_ZSCORE), 2.0)?.let { -it } to 0.4
+                Stats.ratioToScore(f(FeatureKeys.GOLD_RISK_REVERSAL), 3.0) to 0.40,
+                f(FeatureKeys.GOLD_PUT_CALL_OI)?.let { Stats.ratioToScore(it - 1.0, 0.45) } to 0.20,
+                Stats.ratioToScore(f(FeatureKeys.GOLD_IV_SKEW), 8.0) to 0.25,
+                Stats.zToScore(f(FeatureKeys.GOLD_REALIZED_VOL_ZSCORE), 2.0)?.let { -it } to 0.15
             ),
-            listOf(FeatureKeys.GOLD_IV_SKEW, FeatureKeys.GOLD_REALIZED_VOL_ZSCORE)
+            listOf(
+                FeatureKeys.GOLD_RISK_REVERSAL, FeatureKeys.GOLD_PUT_CALL_OI,
+                FeatureKeys.GOLD_IV_SKEW, FeatureKeys.GOLD_REALIZED_VOL_ZSCORE
+            )
         )
 
         /* F16 — Cross-asset. Silver outperforming gold marks a risk-seeking metals complex. */
@@ -263,10 +288,20 @@ class SpecFactorEngine(private val log: DiagnosticLog = DiagnosticLog.shared) {
         )
 
         /* F17 — Dollar liquidity. Funding stress forces liquidation of liquid assets. */
+        /* SPEC v2.1 §25.1 — funding stress is only one leg. Tight financial
+         * conditions and a shrinking pool of net liquidity drain the bid for
+         * every asset, gold included; loosening does the opposite. */
         emit(
             "F17_LIQUIDITY",
-            Stats.zToScore(funding, 2.0)?.let { -it },
-            listOf(FeatureKeys.DOLLAR_FUNDING_STRESS)
+            blend(
+                Stats.zToScore(funding, 2.0)?.let { -it } to 0.40,
+                Stats.ratioToScore(f(FeatureKeys.FINANCIAL_CONDITIONS), 0.60)?.let { -it } to 0.35,
+                Stats.ratioToScore(f(FeatureKeys.FED_NET_LIQUIDITY_CHANGE), 3.0) to 0.25
+            ),
+            listOf(
+                FeatureKeys.DOLLAR_FUNDING_STRESS, FeatureKeys.FINANCIAL_CONDITIONS,
+                FeatureKeys.FED_NET_LIQUIDITY_CHANGE
+            )
         )
 
         /* F18 — Credit. Widening spreads are a haven signal. */
@@ -298,6 +333,11 @@ class SpecFactorEngine(private val log: DiagnosticLog = DiagnosticLog.shared) {
     }
 
     fun toFeatureSet(bundle: FeatureBundle): FeatureSet = FeatureSet(bundle.numeric())
+
+    private companion object {
+        /** The inflation rate the Federal Reserve states as its objective. */
+        const val INFLATION_TARGET = 2.0
+    }
 
     /** Weighted blend that silently drops absent terms and renormalizes the rest. */
     private fun blend(vararg terms: Pair<Double?, Double>): Double? {

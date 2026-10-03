@@ -77,8 +77,34 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
         val real10 = u.seriesOf(MarketUniverse.REAL10Y)
         put(FeatureKeys.REAL_YIELD, real10?.last?.close ?: u.scalar(MarketUniverse.REAL10Y),
             "%", MarketUniverse.REAL10Y)
-        put(FeatureKeys.REAL_YIELD_ZSCORE, real10?.zScore(252), "z", MarketUniverse.REAL10Y)
+        // SPEC v2.1 §25.1 — the Treasury CSV carries two years; the published
+        // daily series carries twenty-three. A z-score is only as honest as
+        // the population behind it, so the deeper history wins when present.
+        val real10Deep = u.seriesOf(MarketUniverse.REAL10Y_DEEP)
+        put(FeatureKeys.REAL_YIELD_ZSCORE,
+            (real10Deep ?: real10)?.zScore(252), "z",
+            if (real10Deep != null) MarketUniverse.REAL10Y_DEEP else MarketUniverse.REAL10Y)
         put(FeatureKeys.REAL_YIELD_TREND, real10?.slope(20), "slope/level", MarketUniverse.REAL10Y)
+
+        // SPEC v2.1 §23 — intraday real yield: the quoted nominal ten-year
+        // less the last published breakeven. The Treasury's own real series is
+        // an end-of-day print, so between publications this is the only read
+        // on where the real yield has moved.
+        val nominalNow = u.scalar(MarketUniverse.US10Y_INTRADAY)
+        val breakevenNow = u.seriesOf(MarketUniverse.BREAKEVEN10Y)?.last?.close
+            ?: u.scalar(MarketUniverse.BREAKEVEN10Y)
+        put(FeatureKeys.REAL_YIELD_INTRADAY_PROXY,
+            if (nominalNow != null && breakevenNow != null) nominalNow - breakevenNow else null,
+            "% (quoted 10Y − last breakeven)", MarketUniverse.US10Y_INTRADAY, isProxy = true,
+            note = "Quoted nominal ten-year minus the most recent published breakeven; " +
+                "the Treasury real curve is end-of-day only.")
+
+        // SPEC v2.1 §25.1 — the market's long-run inflation expectation,
+        // published daily: five-year inflation starting five years from now.
+        put(FeatureKeys.INFLATION_EXPECTATION_5Y5Y,
+            u.seriesOf(MarketUniverse.INFLATION_EXPECTATION_5Y5Y)?.last?.close, "%",
+            MarketUniverse.INFLATION_EXPECTATION_5Y5Y,
+            note = "Five-year, five-year forward inflation expectation rate.")
 
         /* ---- F02 Dollar ------------------------------------------- */
         // SPEC v2.1: the real index is now quoted, so the currency-basket
@@ -106,8 +132,43 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             val b = s.closeAt(20)
             if (a != null && b != null) a - b else null
         }
-        put(FeatureKeys.FED_EXPECTED_RATE_CHANGE, fedChange, "pp", MarketUniverse.US02Y,
-            isProxy = true, note = "Δ2Y(20d) stands in for OIS-implied policy path; CME FedWatch is not accessible.")
+        // SPEC v2.1 §23 — with the published policy rate in hand the expected
+        // path can be read directly: the 3-month bill prices where the market
+        // thinks the rate will be, so bill minus policy rate is the expected
+        // move itself rather than a trend standing in for one.
+        val policyNow = u.scalar(MarketUniverse.POLICY_RATE_US)
+        // SPEC v2.1 §25.3 — a 30-day fed funds future settles on the average
+        // effective rate of its delivery month, so the strip IS the priced
+        // path: no probability tree, no model. Twelve months out against the
+        // published policy rate is the expected move.
+        val impliedFar = u.scalar(MarketUniverse.FED_FUNDS_IMPLIED_12M)
+        val impliedFront = u.scalar(MarketUniverse.FED_FUNDS_IMPLIED_FRONT)
+        put(FeatureKeys.FED_IMPLIED_PATH_12M, impliedFar, "%",
+            MarketUniverse.FED_FUNDS_IMPLIED_12M,
+            note = "Rate implied by the 30-day fed funds future about twelve months out.")
+        val futuresPath = when {
+            impliedFar != null && policyNow != null -> impliedFar - policyNow
+            impliedFar != null && impliedFront != null -> impliedFar - impliedFront
+            else -> null
+        }
+        val billPath = if (us3m != null && policyNow != null) us3m - policyNow else null
+        put(FeatureKeys.FED_EXPECTED_RATE_CHANGE, futuresPath ?: billPath ?: fedChange, "pp",
+            when {
+                futuresPath != null -> MarketUniverse.FED_FUNDS_IMPLIED_12M
+                billPath != null -> MarketUniverse.POLICY_RATE_US
+                else -> MarketUniverse.US02Y
+            },
+            isProxy = futuresPath == null && billPath == null,
+            note = when {
+                futuresPath != null ->
+                    "Fed funds futures twelve months out against the published policy rate: " +
+                        "the move the market is paying for."
+                billPath != null ->
+                    "Three-month bill against the published policy rate; the futures strip " +
+                        "did not quote this cycle."
+                else -> "Δ2Y(20d) stands in for the policy path; neither the strip nor the " +
+                    "published rate was reachable this cycle."
+            })
         // 3M bill relative to the effective funds rate: positive ⇒ market prices hikes.
         put(FeatureKeys.FED_SURPRISE, if (us3m != null && effr != null) us3m - effr else null,
             "pp", MarketUniverse.US03M, isProxy = true)
@@ -138,12 +199,27 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             val sd = Stats.stdev(diffs)
             if (beChange != null && sd != null && sd > 0.0) beChange / (sd * 4.47) else null
         }
-        val measuredSurprise = u.scalar(MarketUniverse.CONSENSUS_SURPRISE)
+        // SPEC v2.1 §23 — released inflation prints against their published
+        // consensus, which is a measurement; the official-statistics read and
+        // the breakeven move remain, in that order, as fallbacks.
+        val releaseSurprise = u.scalar(MarketUniverse.INFLATION_SURPRISE_MEASURED)?.div(50.0)
+        val measuredSurprise = releaseSurprise ?: u.scalar(MarketUniverse.CONSENSUS_SURPRISE)
+        val surpriseSource = when {
+            releaseSurprise != null -> MarketUniverse.INFLATION_SURPRISE_MEASURED
+            measuredSurprise != null -> MarketUniverse.CONSENSUS_SURPRISE
+            else -> MarketUniverse.BREAKEVEN10Y
+        }
         put(FeatureKeys.INFLATION_SURPRISE, measuredSurprise ?: beZ,
             if (measuredSurprise != null) "normalized (actual vs consensus)" else "z",
-            if (measuredSurprise != null) MarketUniverse.CONSENSUS_SURPRISE else MarketUniverse.BREAKEVEN10Y,
+            surpriseSource,
             isProxy = measuredSurprise == null,
-            note = "Market-implied inflation revision; consensus-vs-actual CPI surprise needs a paid consensus feed.")
+            note = when {
+                releaseSurprise != null ->
+                    "Mean normalised miss across released inflation prints versus their published consensus."
+                measuredSurprise != null ->
+                    "Official statistics read against the scheduled consensus."
+                else -> "Market-implied inflation revision; no consensus print was reachable this cycle."
+            })
 
         /* ---- F06 Economic surprise --------------------------------- */
         val spy = u.seriesOf(MarketUniverse.EQUITY_ETF)
@@ -153,9 +229,18 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             val b = tlt.returnOver(20)
             if (a != null && b != null) (a - b) * 100.0 else null
         } else null
-        put(FeatureKeys.ECONOMIC_SURPRISE_INDEX, growthProxy, "pp (20d equity-bond spread)",
-            MarketUniverse.EQUITY_ETF, isProxy = true,
-            note = "PROXY_GROWTH. Citi ESI and Bloomberg consensus are not free; regional Fed surveys are not machine-readable.")
+        // SPEC v2.1 §23 — a measured surprise index: the mean normalised gap
+        // between what was printed and what was forecast across every release
+        // of the last thirty days, in the spirit of the commercial indices but
+        // computed from the public calendar's own actual-versus-consensus rows.
+        val measuredEsi = u.scalar(MarketUniverse.SURPRISE_INDEX_MEASURED)
+        put(FeatureKeys.ECONOMIC_SURPRISE_INDEX, measuredEsi ?: growthProxy,
+            if (measuredEsi != null) "index (actual vs consensus, 30d)" else "pp (20d equity-bond spread)",
+            if (measuredEsi != null) MarketUniverse.SURPRISE_INDEX_MEASURED else MarketUniverse.EQUITY_ETF,
+            isProxy = measuredEsi == null,
+            note = if (measuredEsi != null)
+                "Mean normalised actual-minus-consensus across released US, EU, UK, JP and CN prints."
+            else "PROXY_GROWTH. The calendar's released actuals were unreachable this cycle.")
 
         /* ---- F07 Geopolitical risk --------------------------------- */
         val gvz = u.seriesOf(MarketUniverse.GVZ)
@@ -168,15 +253,56 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             val z = if (ratios.size >= 30) Stats.zScore(ratios.last(), ratios) else null
             z?.let { 50.0 + 16.0 * it }
         } else null
-        put(FeatureKeys.GEOPOLITICAL_RISK_SCORE, geoProxy?.coerceIn(0.0, 100.0), "0-100",
-            MarketUniverse.GVZ, isProxy = true,
-            note = "GVZ/VIX premium z-score. GDELT is rate-limited from server IP ranges and is behind a circuit breaker.")
+        // SPEC v2.1 §25.5 — the risk read is now measured from text, not
+        // inferred from option prices: the Baker-Bloom-Davis daily economic
+        // policy uncertainty index counts the newspaper articles that discuss
+        // policy uncertainty, and the equity-market uncertainty index does the
+        // same for market-related uncertainty. Both are published daily with
+        // no key. The GVZ/VIX premium stays as the fallback.
+        val epuSeries = u.seriesOf(MarketUniverse.POLICY_UNCERTAINTY_DAILY)
+        val newsUncSeries = u.seriesOf(MarketUniverse.NEWS_EQUITY_UNCERTAINTY)
+        put(FeatureKeys.POLICY_UNCERTAINTY, epuSeries?.last?.close, "index (news count)",
+            MarketUniverse.POLICY_UNCERTAINTY_DAILY,
+            note = "Baker, Bloom & Davis daily Economic Policy Uncertainty index.")
+        put(FeatureKeys.NEWS_UNCERTAINTY, newsUncSeries?.last?.close, "index (news count)",
+            MarketUniverse.NEWS_EQUITY_UNCERTAINTY,
+            note = "Equity-market-related economic uncertainty, counted from newspaper text.")
+
+        // Percentile of the last five years puts the two indices on the
+        // factor's own 0-100 scale without inventing a mapping.
+        val epuPercentile = epuSeries?.let { s ->
+            val pop = s.closes.takeLast(1260)
+            if (pop.size >= 120) Stats.percentileRank(pop.last(), pop)?.times(100.0) else null
+        }
+        val newsPercentile = newsUncSeries?.let { s ->
+            val pop = s.closes.takeLast(1260)
+            if (pop.size >= 120) Stats.percentileRank(pop.last(), pop)?.times(100.0) else null
+        }
+        val geoMeasured = listOfNotNull(epuPercentile, newsPercentile)
+            .takeIf { it.isNotEmpty() }?.average()
+        put(FeatureKeys.GEOPOLITICAL_RISK_SCORE,
+            geoMeasured ?: geoProxy?.coerceIn(0.0, 100.0), "0-100",
+            if (geoMeasured != null) MarketUniverse.POLICY_UNCERTAINTY_DAILY else MarketUniverse.GVZ,
+            isProxy = geoMeasured == null,
+            note = if (geoMeasured != null)
+                "Five-year percentile of the daily newspaper-derived uncertainty indices."
+            else "GVZ/VIX premium z-score; the uncertainty indices did not answer this cycle.")
+        val geoDeltaMeasured = epuSeries?.let { s ->
+            val c = s.closes
+            if (c.size < 25) null else {
+                val recent = c.takeLast(5).average()
+                val base = c.takeLast(25).take(20).average()
+                if (base > 0.0) (recent / base - 1.0) * 100.0 else null
+            }
+        }
         val geoDelta = if (gvz != null && vix != null) {
             val g = gvz.returnOver(5)
             val v = vix.returnOver(5)
             if (g != null && v != null) (g - v) * 100.0 else null
         } else null
-        put(FeatureKeys.GEOPOLITICAL_RISK_DELTA, geoDelta, "pp (5d)", MarketUniverse.GVZ, isProxy = true)
+        put(FeatureKeys.GEOPOLITICAL_RISK_DELTA, geoDeltaMeasured ?: geoDelta, "% (5d vs 20d)",
+            if (geoDeltaMeasured != null) MarketUniverse.POLICY_UNCERTAINTY_DAILY else MarketUniverse.GVZ,
+            isProxy = geoDeltaMeasured == null)
 
         /* ---- F08 Financial stress ---------------------------------- */
         put(FeatureKeys.VIX, vix?.last?.close ?: u.scalar(MarketUniverse.VIX), "index", MarketUniverse.VIX)
@@ -200,9 +326,26 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             creditZ?.let { -it },
             fundingZ
         )
-        put(FeatureKeys.FINANCIAL_STRESS_SCORE, if (stress.isEmpty()) null else stress.average(),
-            "z (composite)", MarketUniverse.VIX, isProxy = true,
-            note = "Composite of VIX z, inverted HY/IG ratio z and SOFR-EFFR spread; OFR FSI is published with a lag.")
+        // SPEC v2.1 §25.1 — the published stress indices replace the composite.
+        // STLFSI4 is already a standardised index (zero = average financial
+        // stress), so it needs no second standardisation; the NFCI is on the
+        // same scale. The ETF/VIX composite remains the fallback.
+        val stlfsi = u.scalar(MarketUniverse.FINANCIAL_STRESS_STLFSI)
+        val nfciNow = u.scalar(MarketUniverse.FINANCIAL_CONDITIONS_NFCI)
+        val measuredStress = listOfNotNull(stlfsi, nfciNow).takeIf { it.isNotEmpty() }?.average()
+        put(FeatureKeys.FINANCIAL_STRESS_SCORE,
+            measuredStress ?: if (stress.isEmpty()) null else stress.average(),
+            if (measuredStress != null) "index (0 = average stress)" else "z (composite)",
+            if (measuredStress != null) MarketUniverse.FINANCIAL_STRESS_STLFSI else MarketUniverse.VIX,
+            isProxy = measuredStress == null,
+            note = if (measuredStress != null)
+                "St. Louis Fed Financial Stress Index and the Chicago Fed National Financial " +
+                    "Conditions Index, as published."
+            else "Composite of VIX z, inverted HY/IG ratio z and SOFR-EFFR spread; " +
+                "the published stress indices did not answer this cycle.")
+        put(FeatureKeys.FINANCIAL_CONDITIONS, nfciNow, "index (0 = average)",
+            MarketUniverse.FINANCIAL_CONDITIONS_NFCI,
+            note = "Chicago Fed National Financial Conditions Index: positive is tighter than average.")
 
         /* ---- F09 Gold ETF flow ------------------------------------- */
         val gld = u.seriesOf(MarketUniverse.GOLD_PROXY_ETF)
@@ -307,6 +450,17 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             val current = s.realizedVol(20)
             if (current != null && window.size >= 10) Stats.zScore(current, window + current) else null
         }, "z", goldSourceId, isProxy = goldIsProxy)
+        // SPEC v2.1 §25.2 — measured from the published GLD option chain.
+        // The risk reversal is the price difference between the two wings:
+        // positive means the market pays more for upside than for downside.
+        put(FeatureKeys.GOLD_RISK_REVERSAL, u.scalar(MarketUniverse.GOLD_RISK_REVERSAL_25D),
+            "vol pts (25Δ call − put)", MarketUniverse.GOLD_RISK_REVERSAL_25D,
+            note = "Implied volatility of the 25-delta call less the 25-delta put on the " +
+                "nearest listed expiry beyond two weeks.")
+        put(FeatureKeys.GOLD_PUT_CALL_OI, u.scalar(MarketUniverse.GOLD_PUT_CALL_OI),
+            "put/call", MarketUniverse.GOLD_PUT_CALL_OI,
+            note = "Put open interest over call open interest across every listed GLD contract.")
+
         // IV minus RV: positive ⇒ options market pricing more risk than recent tape.
         put(FeatureKeys.GOLD_IV_SKEW,
             if (gvzLast != null && realizedAnnual != null) gvzLast - realizedAnnual * 100.0 else null,
@@ -346,9 +500,46 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             note = "Official NY Fed reference rates, standardized over 250 sessions. Raw spread: " +
                 (fundingSpreadBp?.let { String.format(java.util.Locale.US, "%.2f bp", it) } ?: "n/a"))
 
+        // SPEC v2.1 §25.1 — net liquidity: the Fed's own balance sheet less
+        // the Treasury's cash balance and the cash parked overnight in reverse
+        // repo. Gold is priced in the dollars that are actually circulating.
+        val netLiq = u.seriesOf(MarketUniverse.FED_NET_LIQUIDITY)
+        put(FeatureKeys.FED_NET_LIQUIDITY, netLiq?.last?.close, "USD bn",
+            MarketUniverse.FED_NET_LIQUIDITY,
+            note = "Fed balance sheet minus the Treasury General Account minus overnight reverse repo.")
+        put(FeatureKeys.FED_NET_LIQUIDITY_CHANGE, netLiq?.returnOver(13)?.times(100.0), "% (13w)",
+            MarketUniverse.FED_NET_LIQUIDITY,
+            note = "Thirteen-week change in net liquidity.")
+
+        // SPEC v2.1 §25.3/§25.4 — the volatility of the bond market and the
+        // slope of the equity fear curve, both quoted.
+        put(FeatureKeys.BOND_VOLATILITY, u.scalar(MarketUniverse.BOND_VOL_MOVE), "index",
+            MarketUniverse.BOND_VOL_MOVE,
+            note = "ICE BofA MOVE index: implied volatility of US Treasuries.")
+        val vix9d = u.scalar(MarketUniverse.VIX_9D)
+        val vix3m = u.scalar(MarketUniverse.VIX_3M)
+        put(FeatureKeys.VIX_TERM_SLOPE,
+            if (vix9d != null && vix3m != null) vix3m - vix9d else null, "vol pts (3M − 9D)",
+            MarketUniverse.VIX_3M,
+            note = "Positive is a calm spot market pricing later risk; negative is acute stress now.")
+
         /* ---- F18 Credit -------------------------------------------- */
-        put(FeatureKeys.CREDIT_SPREAD_HY, creditZ?.let { -it }, "z (inverted HY/IG)", MarketUniverse.HY_ETF,
-            isProxy = true, note = "ETF ratio proxy; ICE BofA OAS requires a FRED API key.")
+        // SPEC v2.1 §25.1 — the option-adjusted spread itself, standardised
+        // against its own ten-year history. FRED's chart export serves it
+        // without a key, which is what the earlier survey had ruled out.
+        val oasSeries = u.seriesOf(MarketUniverse.HY_OAS)
+        val oasZ = oasSeries?.let { s ->
+            val pop = s.closes.takeLast(2520)
+            if (pop.size >= 250) Stats.zScore(pop.last(), pop) else null
+        }
+        put(FeatureKeys.CREDIT_SPREAD_HY, oasZ ?: creditZ?.let { -it },
+            if (oasZ != null) "z (ICE BofA HY OAS)" else "z (inverted HY/IG)",
+            if (oasZ != null) MarketUniverse.HY_OAS else MarketUniverse.HY_ETF,
+            isProxy = oasZ == null,
+            note = if (oasZ != null)
+                "ICE BofA US High Yield option-adjusted spread, standardised over ten years. " +
+                    (oasSeries?.last?.close?.let { String.format(java.util.Locale.US, "Current %.2f pp.", it) } ?: "")
+            else "ETF ratio proxy; the published OAS did not answer this cycle.")
 
         /* ---- F19 / F20 China & India -------------------------------- */
         val cny = u.seriesOf(MarketUniverse.FX_CNY)
@@ -383,17 +574,142 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
             else "MCX quote unavailable this cycle; INR strength is the fallback.")
 
         /* ---- F21 Oil ------------------------------------------------ */
+        // SPEC v2.1 §27 — WTI spot itself, published daily, replaces the ETF.
+        // The fund tracked the barrel with roll drag; the barrel does not.
+        val wti = u.seriesOf(MarketUniverse.WTI_SPOT)
         val uso = u.seriesOf(MarketUniverse.OIL_ETF)
-        put(FeatureKeys.OIL_MOMENTUM, uso?.returnOver(20)?.times(100.0), "% (20d)", MarketUniverse.OIL_ETF,
-            isProxy = true, note = "USO tracks WTI with roll drag; EIA spot requires an API key.")
+        val wtiMomentum = wti?.returnOver(20)?.times(100.0)
+        put(FeatureKeys.WTI_SPOT, wti?.last?.close, "USD/bbl", MarketUniverse.WTI_SPOT)
+        put(FeatureKeys.OIL_MOMENTUM_SPOT, wtiMomentum, "% (20d)", MarketUniverse.WTI_SPOT)
+        put(
+            FeatureKeys.OIL_MOMENTUM,
+            wtiMomentum ?: uso?.returnOver(20)?.times(100.0),
+            "% (20d)",
+            if (wtiMomentum != null) MarketUniverse.WTI_SPOT else MarketUniverse.OIL_ETF,
+            isProxy = wtiMomentum == null,
+            note = if (wtiMomentum != null) "WTI spot as published, no roll drag."
+            else "WTI spot unavailable this cycle; USO is the declared fallback and carries roll drag."
+        )
+        val brent = u.seriesOf(MarketUniverse.BRENT_SPOT)?.last?.close
+        put(
+            FeatureKeys.BRENT_WTI_SPREAD,
+            if (brent != null && wti?.last?.close != null) brent - wti.last!!.close else null,
+            "USD/bbl", MarketUniverse.BRENT_SPOT
+        )
+        put(FeatureKeys.OIL_VOLATILITY, u.seriesOf(MarketUniverse.OIL_VOL_OVX)?.last?.close,
+            "index", MarketUniverse.OIL_VOL_OVX)
+
+        /* ---- SPEC v2.1 §27 — the rest of the measured surface --------- */
+        val real5 = u.seriesOf(MarketUniverse.REAL5Y_DEEP)?.last?.close
+            ?: u.seriesOf(MarketUniverse.REAL_CURVE_5Y)?.last?.close
+        val real30 = u.seriesOf(MarketUniverse.REAL30Y_DEEP)?.last?.close
+            ?: u.seriesOf(MarketUniverse.REAL_CURVE_30Y)?.last?.close
+        put(FeatureKeys.REAL_YIELD_5Y, real5, "%", MarketUniverse.REAL5Y_DEEP)
+        put(
+            FeatureKeys.REAL_CURVE_SLOPE,
+            if (real5 != null && real30 != null) real30 - real5 else null,
+            "pp (30y − 5y)", MarketUniverse.REAL30Y_DEEP
+        )
+        val be5 = u.seriesOf(MarketUniverse.BREAKEVEN5Y_DEEP)?.last?.close
+        val be10 = u.seriesOf(MarketUniverse.BREAKEVEN10Y_DEEP)?.last?.close
+        put(FeatureKeys.BREAKEVEN_5Y, be5, "%", MarketUniverse.BREAKEVEN5Y_DEEP)
+        put(
+            FeatureKeys.BREAKEVEN_SLOPE,
+            if (be5 != null && be10 != null) be10 - be5 else null,
+            "pp (10y − 5y)", MarketUniverse.BREAKEVEN10Y_DEEP
+        )
+        put(FeatureKeys.YIELD_CURVE_10Y_3M, u.seriesOf(MarketUniverse.CURVE_10Y3M_DEEP)?.last?.close,
+            "pp", MarketUniverse.CURVE_10Y3M_DEEP)
+
+        // Positioning, from the report that splits the speculative bucket.
+        val mm = u.seriesOf(MarketUniverse.COT_MANAGED_MONEY_NET)
+        put(FeatureKeys.COT_MANAGED_MONEY_Z, mm?.zScore(156), "z (3y)", MarketUniverse.COT_MANAGED_MONEY_NET)
+        val comm = u.seriesOf(MarketUniverse.COT_COMMERCIAL_NET)
+        put(FeatureKeys.COT_COMMERCIAL_Z, comm?.zScore(156), "z (3y)", MarketUniverse.COT_COMMERCIAL_NET)
+
+        // Credit, across the quality ladder rather than one rung of it.
+        put(FeatureKeys.CREDIT_SPREAD_IG, u.seriesOf(MarketUniverse.IG_OAS)?.last?.close,
+            "pp (OAS)", MarketUniverse.IG_OAS)
+        put(FeatureKeys.CREDIT_SPREAD_CCC, u.seriesOf(MarketUniverse.CCC_OAS)?.last?.close,
+            "pp (OAS)", MarketUniverse.CCC_OAS)
+        put(FeatureKeys.CREDIT_SPREAD_EM, u.seriesOf(MarketUniverse.EM_OAS)?.last?.close,
+            "pp (OAS)", MarketUniverse.EM_OAS)
+
+        // Liquidity, from the desk that runs it.
+        val soma = u.seriesOf(MarketUniverse.SOMA_TOTAL)
+        put(FeatureKeys.SOMA_CHANGE, soma?.returnOver(13)?.times(100.0), "% (13w)", MarketUniverse.SOMA_TOTAL)
+        put(FeatureKeys.REPO_TAIL_SPREAD, u.seriesOf(MarketUniverse.SOFR_P99_SPREAD)?.last?.close,
+            "bp", MarketUniverse.SOFR_P99_SPREAD)
+        put(FeatureKeys.RESERVE_BALANCES, u.seriesOf(MarketUniverse.RESERVE_BALANCES)?.last?.close?.div(1000.0),
+            "USD bn", MarketUniverse.RESERVE_BALANCES)
+
+        // Growth turning point, published as an index around trend.
+        val cli = u.seriesOf(MarketUniverse.OECD_CLI_US)
+        put(FeatureKeys.OECD_LEADING_INDICATOR, cli?.last?.close, "index (100 = trend)",
+            MarketUniverse.OECD_CLI_US)
+        put(
+            FeatureKeys.OECD_LEADING_CHANGE,
+            if (cli != null && cli.size > 6) cli.last!!.close - cli.closeAt(cli.size - 7)!! else null,
+            "index pts (6m)", MarketUniverse.OECD_CLI_US
+        )
+
+        // Cross-asset volatility tilt and the remaining measured reads.
+        val vxn = u.seriesOf(MarketUniverse.NASDAQ_VOL_VXN)?.last?.close
+        val vixDeep = u.seriesOf(MarketUniverse.VIX_DEEP)?.last?.close ?: u.seriesOf(MarketUniverse.VIX)?.last?.close
+        put(
+            FeatureKeys.VOL_DISPERSION_VXN_VIX,
+            if (vxn != null && vixDeep != null && vixDeep > 0.0) vxn / vixDeep else null,
+            "ratio", MarketUniverse.NASDAQ_VOL_VXN
+        )
+        put(FeatureKeys.INFECTIOUS_DISEASE_EMV, u.seriesOf(MarketUniverse.INFECTIOUS_DISEASE_EMV)?.last?.close,
+            "index", MarketUniverse.INFECTIOUS_DISEASE_EMV)
+        put(FeatureKeys.DOLLAR_AFE, u.seriesOf(MarketUniverse.DOLLAR_AFE_INDEX)?.last?.close,
+            "index", MarketUniverse.DOLLAR_AFE_INDEX)
+        put(FeatureKeys.USDCNY, u.seriesOf(MarketUniverse.USDCNY)?.last?.close,
+            "CNY per USD", MarketUniverse.USDCNY)
 
         /* ---- F22 Global CB divergence -------------------------------- */
         val dxyTrend = dxy?.slope(60)
         val us2Trend = us2?.slope(60)
+        // SPEC v2.1 §23 — the divergence is now read from the policy rates
+        // themselves: the US rate against the mean of the other majors, moved
+        // by how that gap has travelled over a year. The dollar-trend proxy is
+        // kept only for cycles where the rate table is unreachable.
+        val rateGap = u.scalar(MarketUniverse.POLICY_RATE_DIVERGENCE)
+        val rateGapChange = u.scalar(MarketUniverse.POLICY_DIVERGENCE_CHANGE_12M)
+        val measuredDivergence = if (rateGap != null) rateGap + (rateGapChange ?: 0.0) else null
         put(FeatureKeys.GLOBAL_CB_POLICY_DIVERGENCE,
-            if (dxyTrend != null && us2Trend != null) (us2Trend - dxyTrend) * 100.0 else null,
-            "divergence index", MarketUniverse.US02Y, isProxy = true,
-            note = "US front-end trend relative to the trade-weighted dollar trend.")
+            measuredDivergence
+                ?: if (dxyTrend != null && us2Trend != null) (us2Trend - dxyTrend) * 100.0 else null,
+            if (measuredDivergence != null) "pp (US − majors, incl. 12m drift)" else "divergence index",
+            if (measuredDivergence != null) MarketUniverse.POLICY_RATE_DIVERGENCE else MarketUniverse.US02Y,
+            isProxy = measuredDivergence == null,
+            note = if (measuredDivergence != null)
+                "Policy rates as published by the central banks: US less the mean of the euro area, " +
+                    "UK, Japan, Switzerland and Canada, plus the twelve-month change in that gap."
+            else "US front-end trend relative to the trade-weighted dollar trend.")
+
+        /* ---- F10 Official sector (SPEC v2.1 §23) ---------------------
+         * Previously NO_FREE_SOURCE. National authorities report their gold
+         * holdings monthly under the IMF reserves template; the engine reads
+         * the net change over the last three reported months, scaled by that
+         * measure's own history, and the breadth of the move across reporting
+         * countries. Nothing here is modelled or interpolated.
+         */
+        val cbNetZ = u.scalar(MarketUniverse.CB_GOLD_NET_3M_Z)
+        val cbNetT = u.scalar(MarketUniverse.CB_GOLD_NET_3M_T)
+        val cbBreadth = u.scalar(MarketUniverse.CB_GOLD_BREADTH)
+        val cbReporters = u.scalar(MarketUniverse.CB_GOLD_REPORTERS)?.toInt()
+        put(FeatureKeys.CENTRAL_BANK_NET_BUYING_3M,
+            cbNetZ ?: cbNetT?.div(CB_NET_TONNES_PER_SIGMA),
+            if (cbNetZ != null) "z (3m net, own history)" else "z (3m net ÷ ${CB_NET_TONNES_PER_SIGMA.toInt()} t)",
+            MarketUniverse.CB_GOLD_NET_3M_T,
+            note = cbNetT?.let {
+                "%+.1f t reported over three months by %d countries.".format(it, cbReporters ?: 0)
+            })
+        put(FeatureKeys.CENTRAL_BANK_PROXY_FLOW, cbBreadth, "buyers−sellers (%)",
+            MarketUniverse.CB_GOLD_BREADTH,
+            note = "Share of reporting countries that added gold last month, less the share that sold.")
 
         /* ---- F12 Physical demand (SPEC v2.1) -------------------------
          * Previously NO_FREE_SOURCE. The two largest physical markets now
@@ -478,6 +794,14 @@ class SpecFeatureEngineer(private val log: DiagnosticLog = DiagnosticLog.shared)
          * what the factor is supposed to read.
          */
         const val INDIA_STRUCTURAL_WEDGE_PCT = 9.0
+
+        /**
+         * Fallback scale for the official-sector net change when too few
+         * reporting windows exist to standardise it against its own history.
+         * Quarterly official buying has run near this magnitude for a decade,
+         * so one unit is one typical quarter.
+         */
+        const val CB_NET_TONNES_PER_SIGMA = 150.0
 
         fun staleness(asOf: Instant, now: Instant): Duration = Duration.between(asOf, now)
         fun absMax(vararg xs: Double?): Double? = xs.filterNotNull().maxByOrNull { abs(it) }

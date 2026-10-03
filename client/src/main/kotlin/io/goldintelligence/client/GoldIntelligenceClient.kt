@@ -1,7 +1,9 @@
 package io.goldintelligence.client
 
 import io.goldintelligence.engine.CrossMarketConfirmation
+import io.goldintelligence.engine.GoldIntelligenceEngine
 import io.goldintelligence.engine.Horizon
+import io.goldintelligence.engine.InferenceBundle
 import io.goldintelligence.engine.InputSnapshot
 import io.goldintelligence.engine.IntelligenceReport
 import io.goldintelligence.engine.MarketContext
@@ -10,8 +12,10 @@ import io.goldintelligence.ingestion.FactorDiagnostic
 import io.goldintelligence.ingestion.FeatureBundle
 import io.goldintelligence.ingestion.MarketUniverse
 import io.goldintelligence.ingestion.SpecFactorEngine
+import io.goldintelligence.ingestion.SeriesAnalogueEngine
 import io.goldintelligence.ingestion.SpecFeatureEngineer
 import io.goldintelligence.ingestion.TimeSeries
+import io.goldintelligence.ingestion.WalkForwardCalibration
 import java.time.Instant
 
 /** Where the analysis is produced. */
@@ -48,7 +52,21 @@ class GoldIntelligenceClient(
     private val aggregator: FreeDataAggregator = FreeDataAggregator(http),
     private val featureEngineer: SpecFeatureEngineer = SpecFeatureEngineer(),
     private val factorEngine: SpecFactorEngine = SpecFactorEngine(),
-    private val engine: MultiHorizonEngine = MultiHorizonEngine(),
+    /**
+     * SPEC v2.1 §24 — the matcher the engine asks for historical analogues.
+     * It is held here because it needs the downloaded history, which the
+     * engine layer never sees.
+     */
+    private val analogues: SeriesAnalogueEngine = SeriesAnalogueEngine(),
+    /**
+     * SPEC v2.1 §26 — the walk-forward replay that turns the downloaded
+     * history into a calibration record. Held here for the same reason as
+     * [analogues]: it needs the history, which the engine layer never sees.
+     */
+    private val calibrator: WalkForwardCalibration = WalkForwardCalibration(),
+    private val engine: MultiHorizonEngine = MultiHorizonEngine(
+        core = GoldIntelligenceEngine(analogueEngine = analogues)
+    ),
     private val screenBuilder: ScreenModelBuilder = ScreenModelBuilder(),
     private val chartFeed: BrokerFeedProvider = BrokerFeedProvider(http),
     private val chartStore: LiveChartStore = LiveChartStore(),
@@ -69,6 +87,17 @@ class GoldIntelligenceClient(
 
     @Volatile
     private var lastGoldHistory: MutableList<Double> = ArrayList()
+
+    /**
+     * The §26 replay reads 20 years of daily bars; those bars change once a
+     * session, so the result is memoised against the history it was built
+     * from rather than recomputed on every 60-second refresh.
+     */
+    @Volatile
+    private var lastInference: InferenceBundle? = null
+
+    @Volatile
+    private var lastInferenceKey: String? = null
 
     fun analyze(now: Instant = Instant.now()): AnalysisResult = when (mode) {
         ClientMode.DIRECT -> analyzeDirect(now)
@@ -96,6 +125,7 @@ class GoldIntelligenceClient(
             factorScores = factors.scores
         )
 
+        analogues.universe = universe
         val context = buildContext(universe, factors.scores.associate { it.factorId to it.score }, now)
         val report = engine.evaluate(snapshot, context, now)
         val chart = buildChart(report, factors.diagnostics, now)
@@ -205,16 +235,49 @@ class GoldIntelligenceClient(
             if (lastGoldHistory.size > HISTORY_CAP) lastGoldHistory.removeAt(0)
         }
 
+        val inference = inferenceFor(u)
+
         return MarketContext(
             factorHistory = lastFactorHistory.filterValues { it.size >= 4 }.mapValues { it.value.toList() },
             goldHistory = lastGoldHistory.toList(),
             sigmaByHorizon = sigmaByHorizon(goldSeries),
             witnesses = witnesses(u),
-            brierDriftRatio = null,
-            // SPEC v2 §19: no live record yet ⇒ calibration quality is zero, not assumed.
-            calibrationQuality = null,
-            spotPrice = u.scalar(MarketUniverse.GOLD_SPOT) ?: goldSeries?.last?.close
+            brierDriftRatio = brierDrift(inference),
+            // SPEC v2.1 §26: measured by the walk-forward replay. Null only
+            // when the replay produced nothing — never assumed.
+            calibrationQuality = inference?.qualityFor(Horizon.D1)?.takeIf { it > 0.0 },
+            spotPrice = u.scalar(MarketUniverse.GOLD_SPOT) ?: goldSeries?.last?.close,
+            inference = inference
         )
+    }
+
+    /**
+     * SPEC v2.1 §26.1. Runs the replay once per set of daily bars; the key is
+     * the gold history's length and last close, which is exactly what changes
+     * when a new session lands.
+     */
+    private fun inferenceFor(u: MarketUniverse): InferenceBundle? {
+        val gold = u.seriesOf(MarketUniverse.GOLD_PROXY_ETF)
+            ?: u.seriesOf(MarketUniverse.GOLD_SPOT_HISTORY)
+            ?: return lastInference
+        val key = "${gold.size}:${gold.last?.close}"
+        if (key == lastInferenceKey) return lastInference
+        calibrator.universe = u
+        val bundle = calibrator.run()
+        lastInference = bundle
+        lastInferenceKey = key
+        return bundle
+    }
+
+    /**
+     * SPEC v2 §D4.8 kill-switch input: the out-of-sample Brier score of the
+     * published mapping against the base-rate forecast it has to beat.
+     * Above 1.0 the mapping is doing worse than climatology.
+     */
+    private fun brierDrift(inference: InferenceBundle?): Double? {
+        val record = inference?.brier?.get(Horizon.D1) ?: return null
+        if (record.uncertainty <= 0.0) return null
+        return record.brier / record.uncertainty
     }
 
     private fun sigmaByHorizon(gold: TimeSeries?): Map<Horizon, Double> {

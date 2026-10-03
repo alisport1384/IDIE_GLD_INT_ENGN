@@ -50,11 +50,64 @@ World Gold Council — LBMA-based benchmark price series.
 U.S. Bureau of Labor Statistics — CPI and unemployment series, public API v1.
   https://api.bls.gov
 
-ForexFactory / FairEconomy — economic calendar with consensus forecasts.
+ForexFactory / FairEconomy — economic calendar, schedule only (fallback).
   https://nfs.faireconomy.media
+
+International Monetary Fund — International Reserves and Foreign Currency
+  Liquidity (IRFCL), monetary gold reported by national authorities, monthly,
+  in fine troy ounces. Attribution required.
+  https://api.imf.org
+
+Bank for International Settlements — central bank policy rates (WS_CBPOL).
+  (c) Bank for International Settlements. Attribution required.
+  https://stats.bis.org
+
+TradingView economic calendar — scheduled releases with the published
+  consensus and the released actual. Attribution required.
+  https://economic-calendar.tradingview.com
+
+Coinbase Exchange — PAXG/USD level-2 order book (1 PAXG = 1 fine ounce).
+  https://api.exchange.coinbase.com
 
 Shanghai Gold Exchange Au(T+D) quote, via Sina and Eastmoney public endpoints.
   https://hq.sinajs.cn / https://push2.eastmoney.com
+
+Federal Reserve Bank of St. Louis (FRED)
+----------------------------------------
+
+  https://fred.stlouisfed.org
+
+  Series retrieved through the public chart export. Individual series carry
+  their own publisher:
+    NFCI                 Federal Reserve Bank of Chicago
+    STLFSI4              Federal Reserve Bank of St. Louis
+    WALCL, WTREGEN,
+    RRPONTSYD, DFII10,
+    T10YIE, T5YIFR,
+    DTWEXBGS             Board of Governors of the Federal Reserve System and
+                         the U.S. Department of the Treasury
+    USEPUINDXD,
+    WLEMUINDXD           Economic Policy Uncertainty indices of Scott R. Baker,
+                         Nicholas Bloom and Steven J. Davis
+    GVZCLS               Cboe Global Markets, Inc.
+    BAMLH0A0HYM2         ICE BofA US High Yield Index Option-Adjusted Spread,
+                         used with permission of ICE Data Indices, LLC
+
+Bundled certificate authority root
+----------------------------------
+
+  Sectigo Public Server Authentication Root R46
+  SHA-256 7B:B6:47:A6:2A:EE:AC:88:BF:25:7A:A5:22:D0:1F:FE:A3:95:E0:AB:45:C7:3F:93:F6:56:54:EC:38:F2:5A:06
+  app/src/main/res/raw/sectigo_server_root_r46.pem
+
+  A public certificate authority root, published by Sectigo Limited and
+  carried by the Mozilla, Microsoft, Apple and Chrome root programmes. It is
+  redistributed unmodified so that Android 10 devices, whose trust store
+  predates it, can verify api.imf.org and fiscaldata.treasury.gov. It is
+  trusted for those two hosts only and in addition to the system trust store,
+  never instead of it. A certificate is a public document; redistributing it
+  grants this project no authority and creates no trust relationship beyond
+  the two hosts named above.
 
 Source policy
 -------------
@@ -72,3 +125,68 @@ This software produces a statistical description of market conditions. It is
 not investment advice, it does not publish a calibrated probability until a
 live scoring record exists, and it reports the absence of a source rather than
 substituting a guess.
+
+Methods (SPEC v2.1 §26)
+-----------------------
+
+The inference layer implements published methods; each is named where it is
+used, in the source, in the specification and on the diagnostics screen. No
+method is novel and none is attributed to this project.
+
+  Brier, G.W. (1950). Verification of forecasts expressed in terms of
+    probability. Monthly Weather Review 78(1).
+  Murphy, A.H. (1973). A new vector partition of the probability score.
+    Journal of Applied Meteorology 12(4).
+  Kalman, R.E. (1960). A new approach to linear filtering and prediction
+    problems. Journal of Basic Engineering 82(1).
+  Lo, A.W. & MacKinlay, A.C. (1988). Stock market prices do not follow random
+    walks: evidence from a simple specification test. Review of Financial
+    Studies 1(1).
+  Adams, R.P. & MacKay, D.J.C. (2007). Bayesian online changepoint detection.
+    arXiv:0710.3742.
+  Meucci, A. (2009). Managing diversification. Risk 22(5).
+  Vovk, V., Gammerman, A. & Shafer, G. (2005). Algorithmic Learning in a
+    Random World. Springer.
+  Lei, J., G'Sell, M., Rinaldo, A., Tibshirani, R.J. & Wasserman, L. (2018).
+    Distribution-free predictive inference for regression. JASA 113(523).
+
+The split-conformal coverage guarantee assumes exchangeability, which a daily
+price series violates. The realised coverage is therefore measured on held-out
+sessions and published beside the nominal level rather than claimed.
+
+
+Sources and methods added with SPEC v2.1 §27
+--------------------------------------------
+
+Data, all reachable without an API key:
+
+  CFTC Public Reporting Environment, disaggregated Commitments of Traders
+    (publicreporting.cftc.gov) - managed-money and commercial-hedger
+    positions in COMEX gold, contract code 088691.
+  Federal Reserve Bank of New York, Markets Data APIs
+    (markets.newyorkfed.org) - SOMA portfolio holdings and SOFR reference
+    rate distribution.
+  Organisation for Economic Co-operation and Development, SDMX
+    (sdmx.oecd.org) - composite leading indicator for the United States.
+  Federal Reserve Bank of St. Louis (FRED) - twenty-four additional
+    published series, listed in DATA_DICTIONARY.md.
+  US Department of the Treasury - the full daily real yield curve.
+
+Methods:
+
+  Hoerl, A.E. & Kennard, R.W. (1970). Ridge regression: biased estimation
+    for nonorthogonal problems. Technometrics 12(1).
+  le Cessie, S. & van Houwelingen, J.C. (1992). Ridge estimators in
+    logistic regression. Applied Statistics 41(1).
+  Bates, J.M. & Granger, C.W.J. (1969). The combination of forecasts.
+    Operational Research Quarterly 20(4).
+  Timmermann, A. (2006). Forecast combinations. In: Handbook of Economic
+    Forecasting, vol. 1, ch. 4. Elsevier.
+  Vovk, V., Gammerman, A. & Shafer, G. (2005). Algorithmic Learning in a
+    Random World, ch. 4 - Mondrian (label-conditional) conformal prediction.
+  Grinold, R.C. & Kahn, R.N. (1999). Active Portfolio Management, 2nd ed.
+    McGraw-Hill - the information coefficient.
+
+Every indicator the application publishes carries a standing provenance
+classification - measured, derived, or declared stand-in - rendered on the
+Indicators screen. No indicator is estimated, modelled or filled in.

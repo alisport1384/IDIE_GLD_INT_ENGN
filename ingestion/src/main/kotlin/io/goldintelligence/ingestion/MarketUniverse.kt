@@ -99,6 +99,110 @@ data class MarketUniverse(
         const val CONSENSUS_SURPRISE = "CONSENSUS_SURPRISE"
         /** Spot history sourced from a gold instrument, not an ETF wrapper. */
         const val GOLD_SPOT_HISTORY = "GOLD_SPOT_HISTORY"
+
+        // --- SPEC v2.1 §23: measured replacements for the last proxies ----
+        /** Official-sector gold, net change over three reported months, tonnes. */
+        const val CB_GOLD_NET_3M_T = "CB_GOLD_NET_3M_T"
+        /** The same change against its own 24-window history. */
+        const val CB_GOLD_NET_3M_Z = "CB_GOLD_NET_3M_Z"
+        /** Buyers minus sellers among reporting countries, ×100. */
+        const val CB_GOLD_BREADTH = "CB_GOLD_BREADTH"
+        const val CB_GOLD_REPORTERS = "CB_GOLD_REPORTERS"
+        /** Mean normalised surprise over recent released prints, ×100. */
+        const val SURPRISE_INDEX_MEASURED = "SURPRISE_INDEX_MEASURED"
+        /** The same, restricted to inflation releases. */
+        const val INFLATION_SURPRISE_MEASURED = "INFLATION_SURPRISE_MEASURED"
+        /** Policy rates as published by the BIS. */
+        const val POLICY_RATE_US = "POLICY_RATE_US"
+        const val POLICY_RATE_DIVERGENCE = "POLICY_RATE_DIVERGENCE"
+        const val POLICY_DIVERGENCE_CHANGE_12M = "POLICY_DIVERGENCE_CHANGE_12M"
+        /** Quoted Treasury yields, intraday, against the end-of-day curve. */
+        const val US10Y_INTRADAY = "US10Y_INTRADAY"
+        const val US02Y_INTRADAY = "US02Y_INTRADAY"
+
+        /* ---- SPEC v2.1 §25 — measured macro, options and news ------- */
+
+        /** FRED series, published daily or weekly, no key required. */
+        const val HY_OAS = "HY_OAS"
+        const val FINANCIAL_CONDITIONS_NFCI = "FINANCIAL_CONDITIONS_NFCI"
+        const val FINANCIAL_STRESS_STLFSI = "FINANCIAL_STRESS_STLFSI"
+        const val FED_BALANCE_SHEET = "FED_BALANCE_SHEET"
+        const val TREASURY_GENERAL_ACCOUNT = "TREASURY_GENERAL_ACCOUNT"
+        const val REVERSE_REPO = "REVERSE_REPO"
+        const val FED_NET_LIQUIDITY = "FED_NET_LIQUIDITY"
+        const val POLICY_UNCERTAINTY_DAILY = "POLICY_UNCERTAINTY_DAILY"
+        const val NEWS_EQUITY_UNCERTAINTY = "NEWS_EQUITY_UNCERTAINTY"
+        const val INFLATION_EXPECTATION_5Y5Y = "INFLATION_EXPECTATION_5Y5Y"
+        const val REAL10Y_DEEP = "REAL10Y_DEEP"
+        const val BREAKEVEN10Y_DEEP = "BREAKEVEN10Y_DEEP"
+        const val GVZ_DEEP = "GVZ_DEEP"
+        const val DOLLAR_BROAD_INDEX = "DOLLAR_BROAD_INDEX"
+
+        /** Market-implied policy path, from the fed funds futures strip. */
+        const val FED_FUNDS_IMPLIED_FRONT = "FED_FUNDS_IMPLIED_FRONT"
+        const val FED_FUNDS_IMPLIED_12M = "FED_FUNDS_IMPLIED_12M"
+
+        /** Volatility of the bond market, and the shape of the equity fear curve. */
+        const val BOND_VOL_MOVE = "BOND_VOL_MOVE"
+        const val VIX_9D = "VIX_9D"
+        const val VIX_3M = "VIX_3M"
+
+        /** Sovereign ten-year yields outside the United States. */
+        const val DE10Y = "DE10Y"
+        const val JP10Y = "JP10Y"
+        const val GB10Y = "GB10Y"
+        const val CN10Y = "CN10Y"
+
+        /** Measured from the published GLD option chain. */
+        const val GOLD_PUT_CALL_OI = "GOLD_PUT_CALL_OI"
+        const val GOLD_PUT_CALL_VOLUME = "GOLD_PUT_CALL_VOLUME"
+        const val GOLD_RISK_REVERSAL_25D = "GOLD_RISK_REVERSAL_25D"
+        const val GOLD_IV_TERM_SLOPE = "GOLD_IV_TERM_SLOPE"
+        const val GOLD_OPTION_OPEN_INTEREST = "GOLD_OPTION_OPEN_INTEREST"
+
+        /** Competing store of value, for the cross-asset read. */
+        const val BTC_SPOT = "BTC_SPOT"
+
+        /* SPEC v2.1 §27 — measured daily history, keyless FRED CSV. Each one
+           is the published series itself, not a stand-in, and each is kept at
+           full depth because the §26 replay reads it. */
+        const val REAL5Y_DEEP = "REAL5Y_DEEP"
+        const val REAL30Y_DEEP = "REAL30Y_DEEP"
+        const val BREAKEVEN5Y_DEEP = "BREAKEVEN5Y_DEEP"
+        const val US10Y_DEEP = "US10Y_DEEP"
+        const val US02Y_DEEP = "US02Y_DEEP"
+        const val CURVE_10Y2Y_DEEP = "CURVE_10Y2Y_DEEP"
+        const val CURVE_10Y3M_DEEP = "CURVE_10Y3M_DEEP"
+        const val VIX_DEEP = "VIX_DEEP"
+        const val NASDAQ_VOL_VXN = "NASDAQ_VOL_VXN"
+        const val OIL_VOL_OVX = "OIL_VOL_OVX"
+        const val WTI_SPOT = "WTI_SPOT"
+        const val BRENT_SPOT = "BRENT_SPOT"
+        const val NATGAS_SPOT = "NATGAS_SPOT"
+        const val IG_OAS = "IG_OAS"
+        const val CCC_OAS = "CCC_OAS"
+        const val EM_OAS = "EM_OAS"
+        const val DOLLAR_AFE_INDEX = "DOLLAR_AFE_INDEX"
+        const val EURUSD = "EURUSD"
+        const val USDJPY = "USDJPY"
+        const val USDCNY = "USDCNY"
+        const val GBPUSD = "GBPUSD"
+        const val RESERVE_BALANCES = "RESERVE_BALANCES"
+        const val FED_FUNDS_EFFECTIVE = "FED_FUNDS_EFFECTIVE"
+        const val INFECTIOUS_DISEASE_EMV = "INFECTIOUS_DISEASE_EMV"
+
+        /* SPEC v2.1 §27 — measured, from sources other than FRED. */
+        const val REAL_CURVE_5Y = "REAL_CURVE_5Y"
+        const val REAL_CURVE_7Y = "REAL_CURVE_7Y"
+        const val REAL_CURVE_10Y = "REAL_CURVE_10Y"
+        const val REAL_CURVE_20Y = "REAL_CURVE_20Y"
+        const val REAL_CURVE_30Y = "REAL_CURVE_30Y"
+        const val COT_MANAGED_MONEY_NET = "COT_MANAGED_MONEY_NET"
+        const val COT_COMMERCIAL_NET = "COT_COMMERCIAL_NET"
+        const val SOMA_TOTAL = "SOMA_TOTAL"
+        const val SOFR_EFFR_SPREAD = "SOFR_EFFR_SPREAD"
+        const val SOFR_P99_SPREAD = "SOFR_P99_SPREAD"
+        const val OECD_CLI_US = "OECD_CLI_US"
     }
 }
 

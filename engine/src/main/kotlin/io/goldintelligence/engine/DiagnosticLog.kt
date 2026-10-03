@@ -98,7 +98,10 @@ data class IndicatorStatus(
  * must not grow without bound, and the newest records are the ones that
  * explain the current screen.
  */
-class DiagnosticLog(private val capacity: Int = DEFAULT_CAPACITY) {
+class DiagnosticLog(
+    private val capacity: Int = DEFAULT_CAPACITY,
+    enabled: Boolean = true
+) {
 
     private val entries = ConcurrentLinkedDeque<LogEntry>()
     private val counter = AtomicLong(0)
@@ -107,6 +110,36 @@ class DiagnosticLog(private val capacity: Int = DEFAULT_CAPACITY) {
     private var minimumLevel: LogLevel = LogLevel.DEBUG
     @Volatile
     private var dropped: Long = 0
+
+    /**
+     * SPEC v2.1 §21.1 — recording switch.
+     *
+     * The product's shared recorder starts **off**: a user who never opens the
+     * logger pays nothing for it and nothing about their session is retained.
+     * Turning it on starts recording from that moment; records from before the
+     * switch do not exist and are never reconstructed.
+     */
+    @Volatile
+    private var recording: Boolean = enabled
+    @Volatile
+    private var suppressed: Long = 0
+
+    fun setRecording(on: Boolean) {
+        if (recording == on) return
+        recording = on
+        if (on) {
+            log(
+                LogLevel.INFO, LogStage.STARTUP, "DiagnosticLog", "RECORDING_ON",
+                "logging switched on; nothing before this moment was recorded" +
+                    if (suppressed > 0) " ($suppressed records were not taken)" else ""
+            )
+        }
+    }
+
+    fun isRecording(): Boolean = recording
+
+    /** How many records were not taken while the switch was off. */
+    fun suppressedCount(): Long = suppressed
 
     fun setMinimumLevel(level: LogLevel) {
         minimumLevel = level
@@ -128,6 +161,10 @@ class DiagnosticLog(private val capacity: Int = DEFAULT_CAPACITY) {
         latencyMillis: Long? = null,
         detail: String? = null
     ) {
+        if (!recording) {
+            suppressed++
+            return
+        }
         if (level.ordinal < minimumLevel.ordinal) return
         val entry = LogEntry(
             sequence = counter.incrementAndGet(),
@@ -341,7 +378,12 @@ class DiagnosticLog(private val capacity: Int = DEFAULT_CAPACITY) {
         const val MAX_DETAIL = 600
 
         /** Process-wide default sink. */
-        val shared: DiagnosticLog = DiagnosticLog()
+        /**
+         * The product-wide recorder. It is created **switched off**; the app's
+         * logger screen and the server's `/v1/logs/on` turn it on when someone
+         * actually needs a trace.
+         */
+        val shared: DiagnosticLog = DiagnosticLog(enabled = false)
     }
 }
 

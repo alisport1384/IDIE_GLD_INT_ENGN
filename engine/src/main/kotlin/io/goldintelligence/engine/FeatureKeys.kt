@@ -135,4 +135,76 @@ object FeatureKeys {
     const val CONSENSUS_SURPRISE = "Consensus_Surprise"
     const val CPI_YOY = "CPI_YoY"
     const val UNEMPLOYMENT_RATE = "Unemployment_Rate"
+
+    // SPEC v2.1 §25 — measured macro, options and news-derived inputs.
+    /** Market-implied policy rate twelve months out, from fed funds futures. */
+    const val FED_IMPLIED_PATH_12M = "FedPath_Implied_12M"
+    /** Chicago Fed National Financial Conditions Index: negative is loose. */
+    const val FINANCIAL_CONDITIONS = "Financial_Conditions"
+    /** Federal Reserve net liquidity, in billions of dollars. */
+    const val FED_NET_LIQUIDITY = "Fed_Net_Liquidity"
+    /** Thirteen-week change in net liquidity, in per cent. */
+    const val FED_NET_LIQUIDITY_CHANGE = "Fed_Net_Liquidity_Change"
+    /** Five-year, five-year forward inflation expectation. */
+    const val INFLATION_EXPECTATION_5Y5Y = "Inflation_Expectation_5Y5Y"
+    /** Implied volatility of the US bond market (MOVE). */
+    const val BOND_VOLATILITY = "Bond_Volatility"
+    /** Equity fear curve: three-month VIX minus nine-day VIX. */
+    const val VIX_TERM_SLOPE = "VIX_Term_Slope"
+    /** Put open interest over call open interest on the gold ETF chain. */
+    const val GOLD_PUT_CALL_OI = "Gold_PutCall_OI"
+    /** Twenty-five delta risk reversal, in volatility points. */
+    const val GOLD_RISK_REVERSAL = "Gold_Risk_Reversal"
+    /** Newspaper-derived daily economic policy uncertainty. */
+    const val POLICY_UNCERTAINTY = "Policy_Uncertainty"
+    /** Newspaper-derived daily equity-market uncertainty. */
+    const val NEWS_UNCERTAINTY = "News_Uncertainty"
+
+    // SPEC v2.1 §27 — measured inputs that replaced a stand-in or added a read.
+    /** WTI spot, published daily by the EIA through FRED. */
+    const val WTI_SPOT = "WTI_Spot"
+    /** Twenty-session change in WTI spot, in per cent. */
+    const val OIL_MOMENTUM_SPOT = "Oil_Momentum_Spot"
+    /** Brent minus WTI, in dollars: the physical-dislocation read. */
+    const val BRENT_WTI_SPREAD = "Brent_WTI_Spread"
+    /** Crude implied volatility (OVX). */
+    const val OIL_VOLATILITY = "Oil_Volatility"
+    /** Real-yield curve slope: 30-year minus 5-year TIPS yield. */
+    const val REAL_CURVE_SLOPE = "Real_Curve_Slope"
+    /** Five-year real yield. */
+    const val REAL_YIELD_5Y = "Real_Yield_5Y"
+    /** Five-year breakeven inflation rate. */
+    const val BREAKEVEN_5Y = "Breakeven_5Y"
+    /** Breakeven curve slope: ten-year minus five-year. */
+    const val BREAKEVEN_SLOPE = "Breakeven_Slope"
+    /** Ten-year minus three-month Treasury spread. */
+    const val YIELD_CURVE_10Y_3M = "Yield_Curve_10Y_3M"
+    /** Managed-money net position from the CFTC disaggregated report. */
+    const val COT_MANAGED_MONEY_Z = "COT_ManagedMoney_Z"
+    /** Commercial-hedger net position from the same report. */
+    const val COT_COMMERCIAL_Z = "COT_Commercial_Z"
+    /** Investment-grade option-adjusted spread. */
+    const val CREDIT_SPREAD_IG = "Credit_Spread_IG"
+    /** CCC and lower option-adjusted spread: the tail of the credit market. */
+    const val CREDIT_SPREAD_CCC = "Credit_Spread_CCC"
+    /** Emerging-market corporate option-adjusted spread. */
+    const val CREDIT_SPREAD_EM = "Credit_Spread_EM"
+    /** Thirteen-week change in the Fed's SOMA portfolio, in per cent. */
+    const val SOMA_CHANGE = "SOMA_Change"
+    /** SOFR's 99th percentile over its volume-weighted median, in basis points. */
+    const val REPO_TAIL_SPREAD = "Repo_Tail_Spread"
+    /** Bank reserve balances at the Fed, in billions. */
+    const val RESERVE_BALANCES = "Reserve_Balances"
+    /** OECD composite leading indicator for the United States. */
+    const val OECD_LEADING_INDICATOR = "OECD_Leading_Indicator"
+    /** Six-month change in that indicator, in index points. */
+    const val OECD_LEADING_CHANGE = "OECD_Leading_Change"
+    /** Nasdaq implied volatility (VXN) over the VIX: the tech-risk tilt. */
+    const val VOL_DISPERSION_VXN_VIX = "Vol_Dispersion_VXN_VIX"
+    /** Newspaper-derived infectious-disease equity-market volatility tracker. */
+    const val INFECTIOUS_DISEASE_EMV = "Infectious_Disease_EMV"
+    /** Dollar against the advanced-foreign-economies basket. */
+    const val DOLLAR_AFE = "Dollar_AFE"
+    /** Yuan per dollar: the managed-currency read behind F19. */
+    const val USDCNY = "USDCNY"
 }
